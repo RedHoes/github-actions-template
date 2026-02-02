@@ -1,0 +1,213 @@
+# Security Best Practices
+#
+# This workflow demonstrates security best practices for GitHub Actions.
+# Key best practices shown:
+# - OIDC for AWS authentication (instead of long-lived credentials)
+# - GitHub App tokens (instead of personal access tokens)
+# - Minimal permissions (only grant what's needed)
+# - Input validation
+# - Proper secrets usage
+#
+# Usage: This workflow can be triggered manually with inputs
+
+name: Security Best Practices
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - deploy
+          - validate
+
+# KEY BEST PRACTICE: Minimal permissions - only grant what's needed
+permissions:
+  contents: read  # Only read, not write
+  id-token: write # Required for OIDC
+  actions: read   # Only read actions, not write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+
+jobs:
+  # Example 1: Input validation
+  validate-inputs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate environment input
+        run: |
+          # KEY BEST PRACTICE: Validate inputs before using them
+          ENV="${{ inputs.environment }}"
+          if [[ ! "$ENV" =~ ^(dev|prod)$ ]]; then
+            echo "❌ Invalid environment: $ENV"
+            echo "Environment must be 'dev' or 'prod'"
+            exit 1
+          fi
+          echo "✅ Environment validated: $ENV"
+
+      - name: Validate action input
+        run: |
+          ACTION="${{ inputs.action }}"
+          if [[ ! "$ACTION" =~ ^(deploy|validate)$ ]]; then
+            echo "❌ Invalid action: $ACTION"
+            exit 1
+          fi
+          echo "✅ Action validated: $ACTION"
+
+  # Example 2: OIDC for AWS authentication
+  deploy-with-oidc:
+    needs: validate-inputs
+    runs-on: ubuntu-latest
+    # KEY BEST PRACTICE: Conditional job execution based on validated inputs
+    if: inputs.action == 'deploy'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Use OIDC instead of long-lived credentials
+      # OIDC provides temporary credentials and is more secure
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Use OIDC role assumption (no access keys needed!)
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+          role-session-name: gh-actions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Verify AWS credentials
+        run: |
+          echo "Verifying AWS credentials..."
+          aws sts get-caller-identity
+          # Credentials are temporary and automatically rotated
+
+      - name: Deploy to ${{ inputs.environment }}
+        run: |
+          echo "Deploying to ${{ inputs.environment }}..."
+          # In a real scenario, you would deploy here
+          # e.g., aws ecs update-service ...
+
+  # Example 3: GitHub App tokens
+  use-github-app-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Use GitHub App tokens instead of personal access tokens
+      # GitHub App tokens are more secure and can be scoped to specific repositories
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: tibdex/github-app-token@v1
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+      - name: Use GitHub App Token
+        env:
+          GITHUB_TOKEN: ${{ steps.github-app-token.outputs.token }}
+        run: |
+          echo "Using GitHub App token for API calls..."
+          # Token is automatically scoped and has limited permissions
+          # curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/repos/${{ github.repository }}
+
+  # Example 4: Secrets usage
+  use-secrets-securely:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use secrets securely
+        env:
+          # KEY BEST PRACTICE: Never hardcode secrets, always use GitHub secrets
+          API_KEY: ${{ secrets.API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          # Secrets are automatically masked in logs
+          echo "Using API key (masked in logs)"
+          # In a real scenario, you would use these secrets:
+          # curl -H "Authorization: Bearer $API_KEY" https://api.example.com
+          
+          # KEY BEST PRACTICE: Don't echo secrets (they're auto-masked, but still)
+          # echo "$API_KEY"  # ❌ Bad - even though it's masked
+          # Use secrets in commands directly instead
+
+  # Example 5: Environment-specific secrets
+  use-environment-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Use environment-specific secrets
+        env:
+          # KEY BEST PRACTICE: Use different secrets for different environments
+          AWS_ROLE: ${{ inputs.environment == 'prod' && secrets.AWS_ROLE_TO_ASSUME_PROD || secrets.AWS_ROLE_TO_ASSUME_DEV }}
+        run: |
+          echo "Using role for ${{ inputs.environment }}"
+          # In a real scenario:
+          # aws-actions/configure-aws-credentials@v4
+          #   with:
+          #     role-to-assume: ${{ env.AWS_ROLE }}
+
+  # Example 6: Minimal permissions example
+  minimal-permissions-example:
+    runs-on: ubuntu-latest
+    # KEY BEST PRACTICE: Override permissions at job level if needed
+    permissions:
+      contents: read
+      # This job only needs read access, no write permissions
+    steps:
+      - name: Checkout code (read-only)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false # Don't persist credentials
+
+      - name: Read repository contents
+        run: |
+          echo "Reading repository contents..."
+          ls -la
+          # This job cannot write to the repository
+
+  # Example 7: Secure script execution
+  secure-script-execution:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run secure script
+        run: |
+          # KEY BEST PRACTICE: Use proper error handling in scripts
+          set -e          # Exit on error
+          set -o pipefail # Exit on pipe failure
+          set -u          # Exit on undefined variable
+          
+          # Validate inputs
+          if [ -z "${{ inputs.environment }}" ]; then
+            echo "Environment is required"
+            exit 1
+          fi
+          
+          echo "Running secure script for ${{ inputs.environment }}"
+
+  # Example 8: Secret rotation reminder
+  secret-rotation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Reminder about secret rotation
+        run: |
+          echo "📝 Best Practice: Rotate secrets regularly"
+          echo "   - GitHub App private keys"
+          echo "   - AWS IAM roles and policies"
+          echo "   - API keys and tokens"
+          echo "   - Database credentials"
+          # In a real scenario, you might check secret age and alert if too old

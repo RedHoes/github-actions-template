@@ -1,0 +1,180 @@
+# Matrix Strategy: Multi-Version Testing
+#
+# This workflow demonstrates using matrix strategies to test against
+# multiple versions of dependencies. Key best practices shown:
+# - Test against multiple Python versions in parallel
+# - Test against multiple Node.js versions in parallel
+# - Combine multiple matrix dimensions for comprehensive testing
+# - Efficient parallel execution
+#
+# Usage: This workflow runs on pull requests and can be triggered manually
+
+name: Matrix Multi-Version Testing
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # required for cache write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Example 1: Test Python application against multiple Python versions
+  test-python:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test against multiple Python versions in parallel
+        python-version: [ '3.9', '3.10', '3.11', '3.12' ]
+      fail-fast: false # Continue testing other versions if one fails
+
+    name: Test Python ${{ matrix.python-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Built-in caching for pip dependencies
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          # Automatically caches pip dependencies
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          # Or if using Poetry:
+          # pip install poetry && poetry install
+
+      - name: Run tests
+        run: |
+          echo "Running tests with Python ${{ matrix.python-version }}"
+          pytest tests/
+          # Or: python -m unittest discover
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-python-${{ matrix.python-version }}
+          path: test-results/
+          retention-days: 7
+
+  # Example 2: Test Node.js application against multiple Node.js versions
+  test-nodejs:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Test against multiple Node.js versions in parallel
+        node-version: [ '18', '20', '22' ]
+      fail-fast: false
+
+    name: Test Node.js ${{ matrix.node-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Built-in caching for yarn/npm dependencies
+      - name: Set up Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          # Automatically caches yarn dependencies
+          cache: 'yarn'
+          # Or for npm: cache: 'npm'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+        # Or: npm ci
+
+      - name: Run linter
+        run: yarn lint
+        # Or: npm run lint
+
+      - name: Run tests
+        run: |
+          echo "Running tests with Node.js ${{ matrix.node-version }}"
+          yarn test --coverage
+          # Or: npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-node-${{ matrix.node-version }}
+          path: coverage/
+          retention-days: 7
+
+  # Example 3: Combine multiple matrix dimensions
+  # This creates a matrix of all combinations (3 Python × 2 OS = 6 jobs)
+  test-multi-dimension:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        python-version: [ '3.10', '3.11', '3.12' ]
+        os: [ ubuntu-latest, windows-latest ]
+        # This creates 3 × 2 = 6 parallel jobs
+      fail-fast: false
+
+    name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest tests/
+
+  # Example 4: Exclude specific combinations
+  test-with-exclusions:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: [ '3.9', '3.10', '3.11' ]
+        include:
+          # Add specific combinations
+          - python-version: '3.12'
+            test-suite: 'full'
+        exclude:
+          # Skip Python 3.9 (maybe it's deprecated)
+          - python-version: '3.9'
+
+    name: Test Python ${{ matrix.python-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: |
+          if [ "${{ matrix.test-suite }}" == "full" ]; then
+            pytest tests/ --cov
+          else
+            pytest tests/
+          fi

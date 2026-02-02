@@ -1,0 +1,208 @@
+# Workflow Optimization Patterns
+#
+# This workflow demonstrates various workflow optimization patterns.
+# Key best practices shown:
+# - Parallel job execution (lint and test run simultaneously)
+# - Job dependencies (build waits for lint and test)
+# - Artifact sharing between jobs
+# - Concurrency control (cancel in-progress runs)
+# - Conditional steps and jobs
+#
+# Usage: This workflow runs on push and can be triggered manually
+
+name: Workflow Optimization Patterns
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # required for cache write and artifacts
+
+concurrency:
+  # KEY BEST PRACTICE: Concurrency control prevents multiple runs from interfering
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true # Cancel older runs when new one starts
+
+jobs:
+  # Example 1: Parallel jobs that run simultaneously
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Run linters
+        run: |
+          echo "Running linters..."
+          yarn lint
+          # Or: npm run lint
+
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-results
+          path: lint-results/
+          retention-days: 7
+
+  # This job runs in parallel with 'lint' (not waiting for it)
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          yarn test --coverage
+          # Or: npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: coverage/
+          retention-days: 7
+
+  # Example 2: Job dependencies - build waits for both lint and test
+  build:
+    # KEY BEST PRACTICE: Use 'needs' to define job dependencies
+    needs: [ lint, test ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build application
+        run: |
+          echo "Building application..."
+          yarn build
+          # Or: npm run build
+
+      # KEY BEST PRACTICE: Upload artifacts for use in other jobs
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 30
+
+  # Example 3: Conditional job execution
+  deploy-dev:
+    needs: build
+    # KEY BEST PRACTICE: Conditional job execution
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Download artifacts from previous job
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      - name: Deploy to DEV
+        run: |
+          echo "Deploying to DEV environment..."
+          # In a real scenario, you would deploy here
+          # e.g., upload to S3, deploy to ECS, etc.
+
+  # Example 4: Conditional steps within a job
+  deploy-prod:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+
+      # KEY BEST PRACTICE: Conditional step execution
+      - name: Deploy to PROD
+        if: github.event_name == 'push'
+        run: |
+          echo "Deploying to PROD environment..."
+          # Only runs on push events, not manual triggers
+
+      - name: Send notification
+        if: always() # Runs even if previous step fails
+        run: |
+          echo "Deployment notification sent"
+
+  # Example 5: Job status checking
+  post-deploy:
+    needs: [ deploy-dev, deploy-prod ]
+    # KEY BEST PRACTICE: Check job status before proceeding
+    if: |
+      always() && 
+      (needs.deploy-dev.result == 'success' || needs.deploy-prod.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post-deployment tasks
+        run: |
+          echo "Running post-deployment tasks..."
+          # Only runs if at least one deployment succeeded
+
+  # Example 6: Reusable workflow pattern (commented example)
+  # This demonstrates how you could extract common patterns
+  # into reusable workflows
+  #
+  # .github/workflows/deploy.yml (reusable workflow):
+  # on:
+  #   workflow_call:
+  #     inputs:
+  #       environment:
+  #         required: true
+  #         type: string
+  #
+  # jobs:
+  #   deploy:
+  #     runs-on: ubuntu-latest
+  #     steps:
+  #       - name: Deploy to ${{ inputs.environment }}
+  #         run: echo "Deploying to ${{ inputs.environment }}"
+  #
+  # Then call it from another workflow:
+  # jobs:
+  #   deploy-prod:
+  #     uses: ./.github/workflows/deploy.yml
+  #     with:
+  #       environment: 'prod'

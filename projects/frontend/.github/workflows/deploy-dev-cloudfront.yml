@@ -1,0 +1,175 @@
+name: Deploy Dev (CloudFront - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a frontend application to AWS CloudFront/S3 (DEV environment).
+# It builds the application and deploys it to S3, then invalidates CloudFront cache.
+# Triggers: Push to main/master branch or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === AWS Configuration ===
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+  AWS_CLOUDFRONT_ID: ${{ vars.AWS_CLOUDFRONT_ID_DEV }}
+  AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET_DEV }}
+  
+  # === Node.js Configuration ===
+  # TODO: Update Node.js version and add your environment variables
+  NODE_VERSION: 22.14.0
+  # Example environment variables:
+  # VITE_API_URL: ${{ vars.VITE_API_URL_DEV }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to dev S3 bucket
+
+    steps:
+      # === Step 1: Setup Environment ===
+      
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Checkout source code
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '3'
+          token: ${{ steps.github-app-token.outputs.token }}
+          ref: ${{ github.head_ref || github.ref }}
+          persist-credentials: false
+
+      # Set Node.js
+      - name: Set Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'yarn'
+
+      # Install dependencies
+      - name: Install dependencies
+        shell: bash
+        run: yarn install --frozen-lockfile
+
+      # Configure AWS Credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      # === Step 2: Build Bundle ===
+      - name: Build Frontend
+        shell: bash
+        run: yarn build
+        env:
+        # TODO: Add your build environment variables here
+        # VITE_API_URL: ${{ vars.VITE_API_URL_DEV }}
+
+      # === Step 3: Deploy to S3 ===
+      - name: Sync to S3
+        shell: bash
+        run: aws s3 sync --delete dist/ s3://${{ env.AWS_S3_BUCKET }}
+
+      # === Step 4: Invalidate CloudFront ===
+      - name: Invalidate CloudFront
+        uses: chetan/invalidate-cloudfront-action@v2
+        with:
+          DISTRIBUTION: ${{ env.AWS_CLOUDFRONT_ID }}
+          PATHS: '/*'
+          AWS_REGION: ${{ env.AWS_REGION }}
+
+      # === Step 5: Extract Git Info ===
+      - name: Extract Git Info
+        id: git-info
+        shell: bash
+        run: |
+          GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+          GITHUB_REVISION=$(git rev-parse HEAD)
+          GITHUB_REPO=$(git config --get remote.origin.url)
+          
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n3 --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+          
+          echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+          echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+          echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+          echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+          echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+          echo "${EOF}" >> "$GITHUB_ENV"
+
+      # === Step 6: Send Slack Notification ===
+      - name: Send Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && ':rocket:' || ':x:' }} *${{ github.event.repository.name }} - Deployed to dev (cloudfront)*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Created by:* ${{ env.GITHUB_AUTHOR }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "```${{ env.GITHUB_COMMITS }}```"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View changes"
+                      },
+                      "style": "primary",
+                      "url": "${{ env.GITHUB_REPO }}/commit/${{ env.GITHUB_REVISION }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Run"
+                      },
+                      "style": "primary",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }

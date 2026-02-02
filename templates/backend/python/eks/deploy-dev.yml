@@ -1,0 +1,90 @@
+name: Deploy DEV (Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Python backend application to AWS EKS (DEV environment).
+# It builds the application, creates a Docker image, pushes it to ECR, and deploys via Helm.
+# Triggers: Push to main/master branch or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: dev
+  GITHUB_SHA: ${{ github.sha }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === Docker Registry ===
+  # TODO: Update these values based on your project
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_DEV }}
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY_DEV }}
+
+  # === Helm Configuration ===
+  # TODO: Update these values based on your project
+  HELM_REPO: ${{ vars.HELM_REPO }}
+  HELM_SPARTAN_VERSION: ${{ vars.HELM_SPARTAN_VERSION }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Language Configuration ===
+  # TODO: Update Python version based on your project
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  deploy:
+    # TODO: Use self-hosted runner for resource-intensive builds (e.g., runs-on: builder-16-32)
+    runs-on: ubuntu-latest
+    name: Deploy to DEV
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-environment
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          aws_role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+          language: 'python'
+          python_version: ${{ env.PYTHON_VERSION }}
+
+      # === Step 2: Build and Package ===
+      # TODO: Add custom build commands if needed (e.g., compile, package, etc.)
+
+      - uses: ./.github/actions/build-and-package
+        id: package
+        with:
+          language: 'python'
+          docker_context: '.'
+          dockerfile: './Dockerfile'
+          docker_repo: ${{ env.DOCKER_REPO }}
+          environment: ${{ env.ENVIRONMENT }}
+          github_sha: ${{ env.GITHUB_SHA }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      # === Step 3: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'eks'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          helm_repo: ${{ env.HELM_REPO }}
+          helm_chart: 'spartan'
+          helm_version: ${{ env.HELM_SPARTAN_VERSION }}
+          values_file: 'k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml'
+          github_token: ${{ env.GITHUB_TOKEN }}
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}

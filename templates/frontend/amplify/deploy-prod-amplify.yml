@@ -1,0 +1,52 @@
+name: Deploy Prod (Amplify - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow triggers an AWS Amplify deployment (PROD environment).
+# It sends a webhook request to Amplify to start a new build and deployment.
+# Triggers: Git tag v*.*.* or manual workflow dispatch.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === Amplify Configuration ===
+  AMPLIFY_WEBHOOK_URL: ${{ secrets.AMPLIFY_WEBHOOK_URL_PROD }}
+
+jobs:
+  amplify_deploy:
+    runs-on: ubuntu-latest
+    name: Amplify Prod Deploy
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-frontend-environment
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          aws_role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME || '' }}
+          aws_region: ${{ env.AWS_REGION || 'us-east-1' }}
+
+      # === Step 2: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'amplify'
+          aws_region: ${{ env.AWS_REGION || 'us-east-1' }}
+          service_name: ${{ github.event.repository.name }}
+          environment: 'prod'
+          webhook_url: ${{ env.AMPLIFY_WEBHOOK_URL }}
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}

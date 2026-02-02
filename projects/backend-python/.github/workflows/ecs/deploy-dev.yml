@@ -1,0 +1,90 @@
+name: Deploy DEV (ECS - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Python backend application to AWS ECS (DEV environment).
+# It builds the application, creates a Docker image, pushes it to ECR, and deploys to ECS.
+# Triggers: Push to main/master branch or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: dev
+  ENVIRONMENT_FULL: development
+  GITHUB_SHA: ${{ github.sha }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID_DEV }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === ECS Configuration ===
+  # TODO: Update these values based on your project
+  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME_DEV }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME_DEV }}
+  TASK_FAMILY: ${{ vars.TASK_FAMILY_DEV }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+
+  # === Docker Configuration ===
+  DOCKER_REPO: ${{ vars.DOCKER_REPO }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_DEV }}
+
+  # === Language Configuration ===
+  # TODO: Update Python version based on your project
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to DEV (ECS)
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-environment
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          aws_role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+          language: 'python'
+          python_version: ${{ env.PYTHON_VERSION }}
+
+      # === Step 2: Build and Package ===
+      - uses: ./.github/actions/build-and-package
+        id: package
+        with:
+          language: 'python'
+          docker_repo: ${{ env.DOCKER_REPO }}
+          environment: ${{ env.ENVIRONMENT }}
+          environment_full: ${{ env.ENVIRONMENT_FULL }}
+          github_sha: ${{ env.GITHUB_SHA }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      # === Step 3: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'ecs'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          ecs_cluster_name: ${{ env.ECS_CLUSTER_NAME }}
+          task_family: ${{ env.TASK_FAMILY }}
+          container_name: ${{ env.CONTAINER_NAME }}
+          image_uri: ${{ env.DOCKER_REPO }}:${{ steps.package.outputs.image_tag || github.sha }}
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          base_domain: ${{ env.BASE_DOMAIN }}

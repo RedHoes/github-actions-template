@@ -1,0 +1,47 @@
+name: Dev - Check Pull Request
+
+# === Workflow Description ===
+# This workflow runs linting, tests, and builds for frontend pull requests.
+# It ensures code quality and catches build errors before merging.
+# Triggers: Pull request events.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: write # required for cache write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === Node.js Configuration ===
+  # TODO: Update corresponding NodeJS version and matching .env values
+  NODE_VERSION: 18.18.2
+  # Example .env values:
+  # VITE_SERVICE_PLATFORM_API_URL: ${{ vars.VITE_SERVICE_PLATFORM_API_URL_DEV }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # === Step 1: Build and Test ===
+      - uses: ./.github/actions/build-and-test
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          ref: ${{ github.head_ref }}
+          language: 'nodejs'
+          node_version: ${{ env.NODE_VERSION }}
+          lint_command: 'yarn lint'
+          run_linters: 'true'
+          test_command: 'yarn test --coverage --watchAll=false'
+          build_command: 'build'
+          run_build: 'true'
+        env:
+        # TODO: Add your build environment variables here
+        # VITE_SERVICE_PLATFORM_API_URL: ${{ vars.VITE_SERVICE_PLATFORM_API_URL_DEV }}

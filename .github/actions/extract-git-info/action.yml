@@ -1,0 +1,45 @@
+name: 'Extract Git Info'
+description: 'Extract git author, revision, and commit messages for notifications'
+inputs:
+  commit_count:
+    description: 'Number of recent commits to include'
+    required: false
+    default: '3'
+outputs:
+  author:
+    description: 'Git author name and email'
+    value: ${{ steps.extract.outputs.author }}
+  revision:
+    description: 'Git revision SHA'
+    value: ${{ steps.extract.outputs.revision }}
+  repo:
+    description: 'Git repository URL'
+    value: ${{ steps.extract.outputs.repo }}
+  commits:
+    description: 'Recent commit messages'
+    value: ${{ steps.extract.outputs.commits }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract Git info
+      id: extract
+      shell: bash
+      run: |
+        GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+        GITHUB_REVISION=$(git rev-parse HEAD)
+        GITHUB_REPO=$(git config --get remote.origin.url)
+        
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n${{ inputs.commit_count }} --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+        
+        echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+        echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+        echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+        echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+        echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+        echo "${EOF}" >> "$GITHUB_ENV"
+        
+        echo "author=${GITHUB_AUTHOR}" >> $GITHUB_OUTPUT
+        echo "revision=${GITHUB_REVISION}" >> $GITHUB_OUTPUT
+        echo "repo=${GITHUB_REPO}" >> $GITHUB_OUTPUT
+        echo "commits=${GITHUB_COMMITS}" >> $GITHUB_OUTPUT

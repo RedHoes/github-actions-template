@@ -1,0 +1,18 @@
+name: 'Docker ECR Login'
+description: 'Login to Amazon ECR'
+inputs:
+  aws_region:
+    description: 'AWS region'
+    required: true
+outputs:
+  registry:
+    description: 'ECR registry URL'
+    value: ${{ steps.login-ecr.outputs.registry }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        aws-region: ${{ inputs.aws_region }}

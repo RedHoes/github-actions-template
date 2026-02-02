@@ -1,0 +1,199 @@
+name: Deploy PROD (Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Kotlin/Java backend application to AWS EKS (PROD environment).
+# It promotes the DEV Docker image to PROD by retagging and deploys via Helm.
+# Triggers: Git tag push (v*.*.*) or manual workflow dispatch.
+
+on:
+  push:
+    tags: [ "v*.*.*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: prod
+  GITHUB_SHA: ${{ github.sha }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  GH_APP_ID: ${{ vars.GH_APP_ID }}
+  GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+  AWS_ROLE_TO_ASSUME_DEV: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === Docker Registry ===
+  # TODO: Update these values based on your project
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_PROD }}
+  DOCKER_REPO_DEV: ${{ vars.DOCKER_REPO_DEV }}
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY_PROD }}
+  DOCKER_REGISTRY_DEV: ${{ vars.DOCKER_REGISTRY_DEV }}
+
+  # === Helm Configuration ===
+  # TODO: Update these values based on your project
+  HELM_REPO: ${{ vars.HELM_REPO }}
+  HELM_SPARTAN_VERSION: ${{ vars.HELM_SPARTAN_VERSION }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_PROD }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Optional Configuration ===
+  # TODO: Update these values if needed for your project
+  FLYWAY_IMAGE_NAME: ${{ vars.FLYWAY_IMAGE_NAME }}
+  LOG_FILE: ${{ vars.LOG_FILE }}
+  DD_AGENT_IMAGE: ${{ vars.DD_AGENT_IMAGE }}
+  DD_LOG_FILE_MOUNT_PATH: ${{ vars.DD_LOG_FILE_MOUNT_PATH }}
+
+jobs:
+  promote-images:
+    outputs:
+      IMAGE_TAG: ${{ steps.prepare_image.outputs.app_version }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: ./.github/actions/setup-github-auth
+        id: github-auth
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          fetch_depth: '3'
+          ref: ${{ github.head_ref }}
+
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME_DEV }}
+          aws_region: ${{ vars.AWS_REGION }}
+
+      - uses: ./.github/actions/docker-ecr-login
+        id: login-ecr-dev
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+
+      - name: "Extract app version from manifest.json or pyproject.toml"
+        id: prepare_image
+        run: |
+          # TODO: Update based on how you store version (manifest.json, pyproject.toml, __version__.py, etc.)
+          # Example for manifest.json:
+          APP_VERSION=$(cat manifest.json \
+            | grep version \
+            | head -1 \
+            | awk -F: '{ print $2 }' \
+            | sed 's/[ ",]//g'
+          )
+          # Example for pyproject.toml:
+          # APP_VERSION=$(grep "^version" pyproject.toml | cut -d'"' -f2)
+          # Example: Extract from git tag
+          # APP_VERSION=${GITHUB_REF#refs/tags/v}
+          
+          echo $APP_VERSION
+          echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+          echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: "Prepare Docker DEV image tags"
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::8}
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+      # TODO: Update Docker image pull steps based on your project structure
+      - name: Pull image from Dev ECR
+        run: |
+          docker pull ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG
+          docker pull ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG
+          docker pull ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG
+
+      - name: Logout from Dev ECR
+        run: |
+          docker logout
+
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ vars.AWS_REGION }}
+
+      - uses: ./.github/actions/docker-ecr-login
+        id: login-ecr
+        with:
+          aws_region: ${{ vars.AWS_REGION }}
+
+      - name: Retag image for Prod
+        run: |
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}:$APP_VERSION
+          
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}-migration:$APP_VERSION
+          
+          docker tag \
+          ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG \
+          ${{ env.DOCKER_REGISTRY }}/worker-rental:$APP_VERSION
+          
+          # Optional: also tag as "latest"
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}:latest
+          
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}-migration:latest
+          
+          docker tag \
+          ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG \
+          ${{ env.DOCKER_REGISTRY }}/worker-rental:latest
+
+      - name: Push image to Prod ECR
+        run: |
+          docker push ${{ env.DOCKER_REPO }}:$APP_VERSION
+          docker push ${{ env.DOCKER_REPO }}:latest
+          
+          docker push ${{ env.DOCKER_REPO }}-migration:$APP_VERSION
+          docker push ${{ env.DOCKER_REPO }}-migration:latest
+          
+          docker push ${{ env.DOCKER_REGISTRY }}/worker-rental:$APP_VERSION
+          docker push ${{ env.DOCKER_REGISTRY }}/worker-rental:latest
+
+  deploy:
+    needs: promote-images
+    runs-on: ubuntu-latest
+    name: Deploy to PROD
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-environment
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          aws_role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+          language: 'java-kotlin'
+          java_version: '17'
+          # TODO: Add artifact registry config if needed
+          # artifactory_url: ${{ vars.ARTIFACTORY_URL }}
+          # artifactory_username: ${{ vars.ARTIFACTORY_USERNAME }}
+          # aws_code_artifact_domain: ${{ vars.AWS_CODE_ARTIFACT_DOMAIN_PROD }}
+          # aws_account_id: ${{ env.AWS_ACCOUNT_ID }}
+
+      # === Step 2: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'eks'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          helm_repo: ${{ env.HELM_REPO }}
+          helm_chart: 'spartan'
+          helm_version: ${{ env.HELM_SPARTAN_VERSION }}
+          values_file: 'k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml'
+          github_token: ${{ env.GITHUB_TOKEN }}
+          slack_webhook_url: ${{ env.SLACK_WEBHOOK_URL }}

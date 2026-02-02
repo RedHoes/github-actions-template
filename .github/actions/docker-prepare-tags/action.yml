@@ -1,0 +1,44 @@
+name: 'Prepare Docker Image Tags'
+description: 'Prepare Docker image tags from SHA or version'
+inputs:
+  github_sha:
+    description: 'GitHub SHA'
+    required: true
+  environment:
+    description: 'Environment name (dev, prod, etc.)'
+    required: false
+    default: ''
+  app_version:
+    description: 'App version from manifest (optional)'
+    required: false
+    default: ''
+  use_sha_only:
+    description: 'Use only SHA for tag (first 8 chars)'
+    required: false
+    default: 'false'
+outputs:
+  image_tag:
+    description: 'Generated image tag'
+    value: ${{ steps.prepare-tag.outputs.image_tag }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Prepare docker image tags
+      id: prepare-tag
+      shell: bash
+      run: |
+        if [ "${{ inputs.use_sha_only }}" = "true" ]; then
+          IMAGE_TAG=$(echo ${{ inputs.github_sha }} | cut -c1-8)
+        elif [ "${{ inputs.app_version }}" != "" ]; then
+          IMAGE_TAG="${{ inputs.app_version }}"
+        elif [ "${{ inputs.environment }}" != "" ]; then
+          SHORT_SHA=$(echo ${{ inputs.github_sha }} | cut -c1-8)
+          CURRENT_DATE=$(date +%Y%m%d)
+          # Support both "dev" and "development" style environment names
+          ENV_NAME="${{ inputs.environment }}"
+          IMAGE_TAG="${ENV_NAME}-${CURRENT_DATE}-${SHORT_SHA}"
+        else
+          IMAGE_TAG=$(echo ${{ inputs.github_sha }} | cut -c1-8)
+        fi
+        echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+        echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT

@@ -1,0 +1,65 @@
+name: Deploy Prod (CloudFront - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a frontend application to AWS CloudFront/S3 (PROD environment).
+# It builds the application and deploys it to S3, then invalidates CloudFront cache.
+# Triggers: Git tag v*.*.* or manual workflow dispatch.
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === AWS Configuration ===
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+  AWS_CLOUDFRONT_ID: ${{ vars.AWS_CLOUDFRONT_ID_PROD }}
+  AWS_S3_BUCKET: ${{ vars.AWS_S3_BUCKET_PROD }}
+  
+  # === Node.js Configuration ===
+  # TODO: Update Node.js version and add your environment variables
+  NODE_VERSION: 22.14.0
+  # Example environment variables:
+  # VITE_API_URL: ${{ vars.VITE_API_URL_PROD }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to prod S3 bucket
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-frontend-environment
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          aws_role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+          node_version: ${{ env.NODE_VERSION }}
+
+      # === Step 2: Build Bundle ===
+      - uses: ./.github/actions/build-frontend-bundle
+        env:
+        # TODO: Add your build environment variables here
+        # VITE_API_URL: ${{ vars.VITE_API_URL_PROD }}
+
+      # === Step 3: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'cloudfront'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ github.event.repository.name }}
+          environment: 'prod'
+          s3_bucket: ${{ env.AWS_S3_BUCKET }}
+          cloudfront_id: ${{ env.AWS_CLOUDFRONT_ID }}
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}

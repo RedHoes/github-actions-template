@@ -1,0 +1,163 @@
+name: Deploy PROD (ArgoCD GitOps - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Python backend application to AWS EKS using ArgoCD GitOps (PROD environment).
+# It promotes the DEV Docker image to PROD by retagging and updates the ArgoCD GitOps repository.
+# ArgoCD automatically syncs changes to the cluster.
+# Triggers: Git tag push (v*.*.*) or manual workflow dispatch.
+
+on:
+  push:
+    tags: [ "v*.*.*" ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ### General
+  ENVIRONMENT: prod
+  GITHUB_SHA: ${{ github.sha }}
+
+  ### AWS Configuration
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID_PROD }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+
+  ### ArgoCD Configuration
+  # TODO: Update these values based on your project
+  ARGOCD_NAMESPACE: ${{ vars.ARGOCD_NAMESPACE }}
+  ARGOCD_PROJECT_NAME: ${{ vars.K8S_NAMESPACE }}-prod
+  ARGOCD_REPO_NAME: ${{ vars.ARGOCD_REPO_NAME }}
+  ARGOCD_SERVICE_PROJECT_NAME: ${{ vars.SERVICE_NAME }}-prod
+
+  ### Docker Configuration
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_PROD }}
+  DOCKER_REPO_DEV: ${{ vars.DOCKER_REPO_DEV }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_PROD }}
+  CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME_PROD }}
+
+  ### Helm Configuration
+  HELM_REPO: ${{ vars.HELM_REPO_SPARTAN }}
+  HELM_CHART: 'spartan'
+  HELM_VERSION: ${{ vars.HELM_VERSION_SPARTAN }}
+
+  ### Kubernetes Configuration
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+  K8S_CONTAINER_PORT: '8080'
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+
+  ### Notification
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  SWAGGER_URL: https://${{ vars.SERVICE_NAME }}.${{ vars.BASE_DOMAIN_PROD }}/swagger/views/swagger-ui/index.html
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to PROD (ArgoCD GitOps)
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Determine tag to use
+        id: tag
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+              TAG="${{ github.event.inputs.tag }}"
+          else
+              # Extract tag from github.ref (e.g., refs/tags/v1.2.3 -> v1.2.3)
+              TAG=${GITHUB_REF#refs/tags/}
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG"
+
+      - uses: ./.github/actions/setup-github-auth
+        id: setup-github-auth
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          fetch_depth: '3'
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/docker-ecr-login
+        id: login-ecr
+        with:
+          aws_region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/docker-prepare-tags
+        id: prepare-tags
+        with:
+          github_sha: ${{ steps.tag.outputs.tag }}
+          environment: 'prod'
+
+      - name: Set PROD_TAG
+        shell: bash
+        run: |
+          echo "PROD_TAG=${{ steps.prepare-tags.outputs.image_tag }}" >> $GITHUB_ENV
+          echo "IMAGE_TAG=${{ steps.prepare-tags.outputs.image_tag }}" >> $GITHUB_ENV
+
+      # TODO: Promote image from DEV to PROD by retagging
+      # Option 1: If using same ECR repo, retag the DEV image
+      # - name: Retag DEV image for PROD
+      #   run: |
+      #     # Get the latest DEV image tag
+      #     DEV_IMAGE_TAG=$(aws ecr describe-images --repository-name ${{ env.DOCKER_REPO_DEV }} --region ${{ env.AWS_REGION }} \
+      #       --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text | grep dev || echo "")
+      #     
+      #     if [ -n "$DEV_IMAGE_TAG" ]; then
+      #       # Retag the DEV image with PROD tag
+      #       MANIFEST=$(aws ecr batch-get-image --repository-name ${{ env.DOCKER_REPO_DEV }} \
+      #         --image-ids imageTag=$DEV_IMAGE_TAG --region ${{ env.AWS_REGION }} \
+      #         --query 'images[0].imageManifest' --output text)
+      #       
+      #       aws ecr put-image --repository-name ${{ env.DOCKER_REPO }} \
+      #         --image-tag ${{ env.PROD_TAG }} --image-manifest "$MANIFEST" --region ${{ env.AWS_REGION }}
+      #     fi
+
+      - name: "Update values for k8s files"
+        uses: cschleiden/replace-tokens@v1
+        with:
+          tokenPrefix: "__"
+          tokenSuffix: "__"
+          files: '["k8s/${{ env.ENVIRONMENT }}/**/*.yaml"]'
+        env:
+          CONFIG_MAP_NAME: ${{ env.SERVICE_NAME }}-config-map
+          CONFIG_SECRET_NAME: ${{ env.SERVICE_NAME }}-env-var
+          IMAGE_TAG: ${{ env.PROD_TAG }}
+
+      - uses: ./.github/actions/commit-argocd-values
+        with:
+          argocd_repo_name: ${{ env.ARGOCD_REPO_NAME }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          commit_message: "Update values for ${{ env.SERVICE_NAME }} service in ${{ env.ENVIRONMENT }} - ${{ steps.tag.outputs.tag }}"
+          github_token: ${{ steps.setup-github-auth.outputs.token }}
+
+      - uses: ./.github/actions/extract-git-info
+        id: git-info
+
+      - uses: ./.github/actions/send-slack-notification
+        if: always()
+        with:
+          webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
+          status: ${{ job.status }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: PROD
+          github_author: ${{ env.GITHUB_AUTHOR }}
+          github_commits: ${{ env.GITHUB_COMMITS }}
+          github_revision: ${{ env.GITHUB_REVISION }}
+          github_repo: ${{ env.GITHUB_REPO }}
+          deployment_type: ArgoCD GitOps
+          view_run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

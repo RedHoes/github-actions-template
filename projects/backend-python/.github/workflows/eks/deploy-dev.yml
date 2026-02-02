@@ -1,0 +1,249 @@
+name: Deploy DEV (Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Python backend application to AWS EKS (DEV environment).
+# It builds the application, creates a Docker image, pushes it to ECR, and deploys via Helm.
+# Triggers: Push to main/master branch or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: dev
+  GITHUB_SHA: ${{ github.sha }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID_DEV }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === Docker Registry ===
+  # TODO: Update these values based on your project
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_DEV }}
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY_DEV }}
+
+  # === Helm Configuration ===
+  # TODO: Update these values based on your project
+  HELM_REPO: ${{ vars.HELM_REPO }}
+  HELM_SPARTAN_VERSION: ${{ vars.HELM_SPARTAN_VERSION }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Language Configuration ===
+  # TODO: Update Python version based on your project
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  deploy:
+    # TODO: Use self-hosted runner for resource-intensive builds (e.g., runs-on: builder-16-32)
+    runs-on: ubuntu-latest
+    name: Deploy to DEV
+
+    steps:
+      # === Step 1: Setup Environment ===
+      
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Checkout source code
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '3'
+          token: ${{ steps.github-app-token.outputs.token }}
+          ref: ${{ github.head_ref || github.ref }}
+          persist-credentials: false
+
+      # Configure AWS Credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      # Install Python dependencies
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # TODO: Uncomment and configure based on your dependency manager
+          pip install -r requirements.txt
+
+      # === Step 2: Build and Package ===
+      # TODO: Add custom build commands if needed (e.g., compile, package, etc.)
+
+      # Build Python (if needed)
+      - name: Build Python
+        shell: bash
+        run: |
+          if [ "" != "" ]; then
+            echo "Add your Python build commands here"
+          else
+            echo "No build commands specified"
+          fi
+
+      # Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Set up Docker Buildx for caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # Cache Docker layers
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # Prepare Docker Tags
+      - name: Prepare Docker Tags
+        id: prepare-tags
+        shell: bash
+        run: |
+          GITHUB_SHA="${{ env.GITHUB_SHA }}"
+          SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-8)
+          CURRENT_DATE=$(date +%Y%m%d)
+          IMAGE_TAG="dev-${CURRENT_DATE}-${SHORT_SHA}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      # Build and Push Docker Image
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: |
+            ${{ env.DOCKER_REPO }}:${{ steps.prepare-tags.outputs.image_tag }}
+            ${{ env.DOCKER_REPO }}:dev
+          cache-from: type=local,src=${{ runner.temp }}/.buildx-cache
+          cache-to: type=local,dest=${{ runner.temp }}/.buildx-cache,mode=max
+          push: true
+
+      # === Step 3: Deploy and Notify ===
+      
+      # Deploy to EKS via Helm
+      - name: Deploy to EKS via Helm
+        shell: bash
+        run: |
+          if [ "${{ env.GITHUB_TOKEN }}" != "" ]; then
+            helm repo add spartan https://${{ env.GITHUB_TOKEN }}@${{ env.HELM_REPO }}
+          else
+            helm repo add spartan ${{ env.HELM_REPO }}
+          fi
+          
+          NAMESPACE="${{ env.SERVICE_NAME }}-${{ env.ENVIRONMENT }}"
+          
+          if [ "k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml" != "" ]; then
+            helm upgrade --install --wait --timeout 600s ${{ env.SERVICE_NAME }}-deployment spartan/spartan --create-namespace -n $NAMESPACE -f k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml --version ${{ env.HELM_SPARTAN_VERSION }}
+          else
+            helm upgrade --install --wait --timeout 600s ${{ env.SERVICE_NAME }}-deployment spartan/spartan --create-namespace -n $NAMESPACE --version ${{ env.HELM_SPARTAN_VERSION }}
+          fi
+
+      # Extract Git Info for notifications
+      - name: Extract Git Info
+        id: git-info
+        shell: bash
+        run: |
+          GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+          GITHUB_REVISION=$(git rev-parse HEAD)
+          GITHUB_REPO=$(git config --get remote.origin.url)
+          
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n3 --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+          
+          echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+          echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+          echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+          echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+          echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+          echo "${EOF}" >> "$GITHUB_ENV"
+
+      # Send Slack Notification
+      - name: Send Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && ':rocket:' || ':x:' }} *${{ env.SERVICE_NAME }} - Deployed to ${{ env.ENVIRONMENT }} (eks)*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Created by:* ${{ env.GITHUB_AUTHOR }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "```${{ env.GITHUB_COMMITS }}```"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View changes"
+                      },
+                      "style": "primary",
+                      "url": "${{ env.GITHUB_REPO }}/commit/${{ env.GITHUB_REVISION }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Run"
+                      },
+                      "style": "primary",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }

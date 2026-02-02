@@ -1,0 +1,59 @@
+name: 'Setup Java/Kotlin'
+description: 'Setup JDK, Gradle, and configure artifact registry'
+inputs:
+  java_version:
+    description: 'Java version to use'
+    required: true
+  artifactory_url:
+    description: 'Artifact registry Maven release URL'
+    required: false
+  artifactory_username:
+    description: 'Artifact registry username'
+    required: false
+  aws_code_artifact_domain:
+    description: 'AWS CodeArtifact domain'
+    required: false
+  aws_account_id:
+    description: 'AWS account ID'
+    required: false
+  aws_region:
+    description: 'AWS region'
+    required: false
+  cache_read_only:
+    description: 'Whether Gradle cache is read-only'
+    required: false
+    default: 'false'
+runs:
+  using: 'composite'
+  steps:
+    - name: Install AWS CLI
+      if: inputs.aws_code_artifact_domain != ''
+      shell: bash
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        aws --version
+
+    - name: Write gradle.properties
+      if: inputs.artifactory_url != '' && inputs.aws_code_artifact_domain != ''
+      shell: bash
+      run: |
+        mkdir -p ~/.gradle
+        cat <<EOF > ~/.gradle/gradle.properties
+        artifactRegistryMavenReleaseUrl=${{ inputs.artifactory_url }}
+        artifactRegistryMavenUsername=${{ inputs.artifactory_username }}
+        artifactRegistryMavenPassword=$(aws codeartifact get-authorization-token --domain ${{ inputs.aws_code_artifact_domain }} --domain-owner ${{ inputs.aws_account_id }} --region ${{ inputs.aws_region }} --query authorizationToken --output text)
+        EOF
+
+    - name: Set up JDK
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java_version }}
+        distribution: 'temurin'
+        cache: gradle
+
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
+      with:
+        cache-read-only: ${{ inputs.cache_read_only }}

@@ -1,0 +1,36 @@
+name: 'Setup Python'
+description: 'Setup Python version and install dependencies'
+inputs:
+  python_version:
+    description: 'Python version to use'
+    required: true
+  cache:
+    description: 'Cache type (pip or poetry)'
+    required: false
+    default: 'pip'
+  install_dependencies:
+    description: 'Whether to install dependencies'
+    required: false
+    default: 'true'
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+        cache: ${{ inputs.cache }}
+
+    - name: Install dependencies
+      if: inputs.install_dependencies == 'true'
+      shell: bash
+      run: |
+        # TODO: Uncomment and configure based on your dependency manager
+        # Option 1: Using pip
+        # python -m pip install --upgrade pip
+        # pip install -r requirements.txt
+        #
+        # Option 2: Using Poetry
+        # curl -sSL https://install.python-poetry.org | python3 -
+        # poetry install --no-interaction --no-ansi
+        echo "Add your dependency installation commands here"

@@ -1,0 +1,270 @@
+# Error Handling and Notifications
+#
+# This workflow demonstrates proper error handling and notification patterns.
+# Key best practices shown:
+# - Always send notifications (even on failure) using if: always()
+# - Proper exit codes with set -e and set -o pipefail
+# - Job status checking before proceeding
+# - continue-on-error for non-critical steps
+# - Proper error messages and context
+#
+# Usage: This workflow can be triggered manually to test error handling
+
+name: Error Handling and Notifications
+
+on:
+  workflow_dispatch:
+    inputs:
+      should_fail:
+        description: 'Simulate a failure?'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Example 1: Always send notifications
+  test-with-notifications:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run tests
+        id: tests
+        run: |
+          echo "Running tests..."
+          if [ "${{ inputs.should_fail }}" == "true" ]; then
+            echo "Simulating test failure"
+            exit 1
+          fi
+          echo "Tests passed!"
+
+      # KEY BEST PRACTICE: Always send notifications, even on failure
+      - name: Send notification
+        if: always() # Runs even if previous steps failed
+        env:
+          JOB_STATUS: ${{ job.status }}
+          STEP_STATUS: ${{ steps.tests.outcome }}
+        run: |
+          if [ "$JOB_STATUS" == "success" ]; then
+            echo "✅ Tests passed successfully"
+            # In a real scenario, send success notification:
+            # curl -X POST $SLACK_WEBHOOK -d '{"text":"✅ Tests passed"}'
+          else
+            echo "❌ Tests failed"
+            # In a real scenario, send failure notification:
+            # curl -X POST $SLACK_WEBHOOK -d '{"text":"❌ Tests failed"}'
+          fi
+
+  # Example 2: Proper exit codes in scripts
+  proper-exit-codes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run script with proper error handling
+        run: |
+          # KEY BEST PRACTICE: Use proper exit codes
+          set -e          # Exit immediately if a command exits with non-zero status
+          set -o pipefail # Return value of a pipeline is the status of the last command to exit with non-zero
+          
+          echo "Running script..."
+          
+          # Example: Check if file exists
+          if [ ! -f "package.json" ]; then
+            echo "Error: package.json not found"
+            exit 1
+          fi
+          
+          # Example: Run command and check result
+          npm test || {
+            echo "Error: Tests failed"
+            exit 1
+          }
+          
+          echo "Script completed successfully"
+
+  # Example 3: continue-on-error for non-critical steps
+  non-critical-steps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Use continue-on-error for non-critical steps
+      - name: Run optional linter (non-critical)
+        continue-on-error: true
+        run: |
+          echo "Running optional linter..."
+          # This step can fail without failing the entire job
+          npm run lint:optional || echo "Optional linter failed, continuing..."
+
+      - name: Run critical tests
+        run: |
+          echo "Running critical tests..."
+          npm test
+          # This step must pass for the job to succeed
+
+      - name: Upload optional results
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: optional-results
+          path: optional-results/
+          # Upload even if it fails
+
+  # Example 4: Job status checking
+  job-status-checking:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build
+        id: build
+        run: |
+          echo "Building..."
+          if [ "${{ inputs.should_fail }}" == "true" ]; then
+            echo "Simulating build failure"
+            exit 1
+          fi
+          echo "Build successful"
+
+      - name: Deploy (only if build succeeded)
+        # KEY BEST PRACTICE: Check step outcome before proceeding
+        if: steps.build.outcome == 'success'
+        run: |
+          echo "Deploying..."
+          # Only runs if build succeeded
+
+  # Example 5: Dependent job status checking
+  dependent-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run tests
+        run: |
+          echo "Running tests..."
+          if [ "${{ inputs.should_fail }}" == "true" ]; then
+            exit 1
+          fi
+
+  deploy-after-tests:
+    needs: dependent-jobs
+    runs-on: ubuntu-latest
+    # KEY BEST PRACTICE: Check job status before proceeding
+    if: needs.dependent-jobs.result == 'success'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy
+        run: |
+          echo "Deploying..."
+          # Only runs if dependent-jobs succeeded
+
+  # Example 6: Error context and debugging
+  error-context:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run command with error context
+        run: |
+          # KEY BEST PRACTICE: Provide context in error messages
+          set -e
+          set -o pipefail
+          
+          echo "Running deployment..."
+          
+          # Capture output for debugging
+          DEPLOY_OUTPUT=$(npm run deploy 2>&1) || {
+            echo "❌ Deployment failed"
+            echo "Error output: $DEPLOY_OUTPUT"
+            echo "Git SHA: ${{ github.sha }}"
+            echo "Workflow run: ${{ github.run_id }}"
+            exit 1
+          }
+          
+          echo "✅ Deployment successful"
+
+  # Example 7: Cleanup on failure
+  cleanup-on-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup
+        run: |
+          echo "Setting up..."
+          mkdir -p temp/
+          echo "test" > temp/file.txt
+
+      - name: Process
+        run: |
+          echo "Processing..."
+          if [ "${{ inputs.should_fail }}" == "true" ]; then
+            echo "Simulating failure"
+            exit 1
+          fi
+
+      # KEY BEST PRACTICE: Always run cleanup, even on failure
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up..."
+          rm -rf temp/
+          # Always runs, even if previous steps failed
+
+  # Example 8: Notification with job details
+  detailed-notifications:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run workflow
+        id: workflow
+        run: |
+          echo "Running workflow..."
+          if [ "${{ inputs.should_fail }}" == "true" ]; then
+            exit 1
+          fi
+
+      # KEY BEST PRACTICE: Include context in notifications
+      - name: Send detailed notification
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          WORKFLOW_STATUS: ${{ steps.workflow.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_SHA: ${{ github.sha }}
+          COMMIT_AUTHOR: ${{ github.actor }}
+        run: |
+          echo "Sending notification..."
+          echo "Status: $JOB_STATUS"
+          echo "Workflow: $WORKFLOW_STATUS"
+          echo "Run URL: $RUN_URL"
+          echo "Commit: $COMMIT_SHA"
+          echo "Author: $COMMIT_AUTHOR"
+          
+          # In a real scenario, send to Slack/email/etc:
+          # curl -X POST $SLACK_WEBHOOK -d "{
+          #   \"text\": \"Workflow $JOB_STATUS\",
+          #   \"attachments\": [{
+          #     \"color\": \"$([ \"$JOB_STATUS\" == \"success\" ] && echo \"good\" || echo \"danger\")\",
+          #     \"fields\": [{
+          #       \"title\": \"Commit\",
+          #       \"value\": \"$COMMIT_SHA\",
+          #       \"short\": true
+          #     }]
+          #   }]
+          # }"

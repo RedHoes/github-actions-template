@@ -1,0 +1,54 @@
+name: 'Commit ArgoCD Values File'
+description: 'Copy values file to ArgoCD GitOps repository and commit'
+inputs:
+  argocd_repo_name:
+    description: 'ArgoCD GitOps repository name'
+    required: true
+  service_name:
+    description: 'Service name'
+    required: true
+  environment:
+    description: 'Environment name'
+    required: true
+  values_file_path:
+    description: 'Path to source values file'
+    required: false
+    default: 'k8s/${{ inputs.environment }}/values.yaml'
+  commit_message:
+    description: 'Custom commit message (optional)'
+    required: false
+    default: ''
+  github_token:
+    description: 'GitHub token for authentication'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Checkout ArgoCD GitOps repository
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/${{ inputs.argocd_repo_name }}
+        ref: ${{ inputs.environment }}
+        token: ${{ inputs.github_token }}
+        path: ${{ inputs.argocd_repo_name }}
+
+    - name: Copy and commit values file
+      shell: bash
+      run: |
+        TARGET_PATH="${{ inputs.service_name }}"
+        SOURCE_FILE="${{ inputs.values_file_path }}"
+        cp "$SOURCE_FILE" ${{ inputs.argocd_repo_name }}/$TARGET_PATH/values.yaml
+        cd ${{ inputs.argocd_repo_name }}
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git config --global user.name "github-actions[bot]"
+        git add $TARGET_PATH/values.yaml
+        
+        if [ -n "${{ inputs.commit_message }}" ]; then
+          COMMIT_MSG="${{ inputs.commit_message }}"
+        else
+          COMMIT_MSG="Update values for ${{ inputs.service_name }} service in ${{ inputs.environment }}"
+        fi
+        
+        git commit -m "$COMMIT_MSG"
+        git push

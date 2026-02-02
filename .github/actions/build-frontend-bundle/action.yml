@@ -1,0 +1,25 @@
+name: 'Build Frontend Bundle'
+description: 'Build frontend application bundle'
+inputs:
+  build_command:
+    description: 'Build command'
+    required: false
+    default: 'build'
+  package_manager:
+    description: 'Package manager (yarn, npm, pnpm)'
+    required: false
+    default: 'yarn'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Build Frontend
+      shell: bash
+      run: |
+        if [ "${{ inputs.package_manager }}" = "yarn" ]; then
+          yarn ${{ inputs.build_command }}
+        elif [ "${{ inputs.package_manager }}" = "pnpm" ]; then
+          pnpm run ${{ inputs.build_command }}
+        else
+          npm run ${{ inputs.build_command }}
+        fi

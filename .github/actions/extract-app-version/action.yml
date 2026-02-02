@@ -1,0 +1,46 @@
+name: 'Extract App Version'
+description: 'Extract application version from manifest.json, pyproject.toml, or git tag'
+inputs:
+  version_source:
+    description: 'Source to extract version from: manifest, pyproject, or git-tag'
+    required: false
+    default: 'manifest'
+  version_file:
+    description: 'Path to version file (for manifest or pyproject)'
+    required: false
+    default: 'manifest.json'
+outputs:
+  app_version:
+    description: 'Extracted application version'
+    value: ${{ steps.extract.outputs.app_version }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Extract app version
+      id: extract
+      shell: bash
+      run: |
+        case "${{ inputs.version_source }}" in
+          manifest)
+            APP_VERSION=$(cat ${{ inputs.version_file }} \
+              | grep version \
+              | head -1 \
+              | awk -F: '{ print $2 }' \
+              | sed 's/[ ",]//g'
+            )
+            ;;
+          pyproject)
+            APP_VERSION=$(grep "^version" ${{ inputs.version_file }} | cut -d'"' -f2)
+            ;;
+          git-tag)
+            APP_VERSION=${GITHUB_REF#refs/tags/v}
+            ;;
+          *)
+            echo "Unknown version source: ${{ inputs.version_source }}"
+            exit 1
+            ;;
+        esac
+        
+        echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+        echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
+        echo "Extracted version: ${APP_VERSION}"

@@ -1,0 +1,328 @@
+name: Deploy PROD (Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Kotlin/Java backend application to AWS EKS (PROD environment).
+# It promotes the DEV Docker image to PROD by retagging and deploys via Helm.
+# Triggers: Git tag push (v*.*.*) or manual workflow dispatch.
+
+on:
+  push:
+    tags: [ "v*.*.*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: prod
+  GITHUB_SHA: ${{ github.sha }}
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+  GH_APP_ID: ${{ vars.GH_APP_ID }}
+  GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID_PROD }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+  AWS_ROLE_TO_ASSUME_DEV: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === Docker Registry ===
+  # TODO: Update these values based on your project
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_PROD }}
+  DOCKER_REPO_DEV: ${{ vars.DOCKER_REPO_DEV }}
+  DOCKER_REGISTRY: ${{ vars.DOCKER_REGISTRY_PROD }}
+  DOCKER_REGISTRY_DEV: ${{ vars.DOCKER_REGISTRY_DEV }}
+
+  # === Helm Configuration ===
+  # TODO: Update these values based on your project
+  HELM_REPO: ${{ vars.HELM_REPO }}
+  HELM_SPARTAN_VERSION: ${{ vars.HELM_SPARTAN_VERSION }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_PROD }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # === Optional Configuration ===
+  # TODO: Update these values if needed for your project
+  FLYWAY_IMAGE_NAME: ${{ vars.FLYWAY_IMAGE_NAME }}
+  LOG_FILE: ${{ vars.LOG_FILE }}
+  DD_AGENT_IMAGE: ${{ vars.DD_AGENT_IMAGE }}
+  DD_LOG_FILE_MOUNT_PATH: ${{ vars.DD_LOG_FILE_MOUNT_PATH }}
+
+jobs:
+  promote-images:
+    outputs:
+      IMAGE_TAG: ${{ steps.prepare_image.outputs.app_version }}
+    runs-on: ubuntu-latest
+
+    steps:
+      # === Setup GitHub Authentication ===
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '3'
+          token: ${{ steps.github-app-token.outputs.token }}
+          ref: ${{ github.head_ref }}
+          persist-credentials: false
+
+      # === Setup AWS Credentials (DEV) ===
+      - name: Configure AWS Credentials (DEV)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME_DEV }}
+          role-session-name: gh-actions
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # === Login to DEV ECR ===
+      - name: Login to Amazon ECR (DEV)
+        id: login-ecr-dev
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # === Extract App Version ===
+      - name: "Extract app version from manifest.json or pyproject.toml"
+        id: prepare_image
+        shell: bash
+        run: |
+          # TODO: Update based on how you store version (manifest.json, pyproject.toml, __version__.py, etc.)
+          # Example for manifest.json:
+          APP_VERSION=$(cat manifest.json \
+            | grep version \
+            | head -1 \
+            | awk -F: '{ print $2 }' \
+            | sed 's/[ ",]//g'
+          )
+          # Example for pyproject.toml:
+          # APP_VERSION=$(grep "^version" pyproject.toml | cut -d'"' -f2)
+          # Example: Extract from git tag
+          # APP_VERSION=${GITHUB_REF#refs/tags/v}
+          
+          echo $APP_VERSION
+          echo "APP_VERSION=${APP_VERSION}" >> $GITHUB_ENV
+          echo "app_version=${APP_VERSION}" >> $GITHUB_OUTPUT
+
+      # === Prepare Docker DEV Image Tags ===
+      - name: "Prepare Docker DEV image tags"
+        shell: bash
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::8}
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+
+      # === Pull Images from DEV ECR ===
+      # TODO: Update Docker image pull steps based on your project structure
+      - name: Pull image from Dev ECR
+        shell: bash
+        run: |
+          docker pull ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG
+          docker pull ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG
+          docker pull ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG
+
+      - name: Logout from Dev ECR
+        shell: bash
+        run: docker logout
+
+      # === Setup AWS Credentials (PROD) ===
+      - name: Configure AWS Credentials (PROD)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-actions
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # === Login to PROD ECR ===
+      - name: Login to Amazon ECR (PROD)
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          aws-region: ${{ vars.AWS_REGION }}
+
+      # === Retag Images for PROD ===
+      - name: Retag image for Prod
+        shell: bash
+        run: |
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}:$APP_VERSION
+          
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}-migration:$APP_VERSION
+          
+          docker tag \
+          ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG \
+          ${{ env.DOCKER_REGISTRY }}/worker-rental:$APP_VERSION
+          
+          # Optional: also tag as "latest"
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}:latest
+          
+          docker tag \
+          ${{ env.DOCKER_REPO_DEV }}-migration:$IMAGE_TAG \
+          ${{ env.DOCKER_REPO }}-migration:latest
+          
+          docker tag \
+          ${{ env.DOCKER_REGISTRY_DEV }}/worker-rental:$IMAGE_TAG \
+          ${{ env.DOCKER_REGISTRY }}/worker-rental:latest
+
+      # === Push Images to PROD ECR ===
+      - name: Push image to Prod ECR
+        shell: bash
+        run: |
+          docker push ${{ env.DOCKER_REPO }}:$APP_VERSION
+          docker push ${{ env.DOCKER_REPO }}:latest
+          
+          docker push ${{ env.DOCKER_REPO }}-migration:$APP_VERSION
+          docker push ${{ env.DOCKER_REPO }}-migration:latest
+          
+          docker push ${{ env.DOCKER_REGISTRY }}/worker-rental:$APP_VERSION
+          docker push ${{ env.DOCKER_REGISTRY }}/worker-rental:latest
+
+  deploy:
+    needs: promote-images
+    runs-on: ubuntu-latest
+    name: Deploy to PROD
+
+    steps:
+      # === Step 1: Setup Environment ===
+      
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Checkout source code
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '3'
+          token: ${{ steps.github-app-token.outputs.token }}
+          ref: ${{ github.head_ref || github.ref }}
+          persist-credentials: false
+
+      # Configure AWS Credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Set up JDK (minimal setup for deployment)
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # === Step 2: Deploy to EKS via Helm ===
+      - name: Deploy to EKS via Helm
+        shell: bash
+        run: |
+          if [ "${{ env.GITHUB_TOKEN }}" != "" ]; then
+            helm repo add spartan https://${{ env.GITHUB_TOKEN }}@${{ env.HELM_REPO }}
+          else
+            helm repo add spartan ${{ env.HELM_REPO }}
+          fi
+          
+          NAMESPACE="${{ env.SERVICE_NAME }}-${{ env.ENVIRONMENT }}"
+          
+          if [ "k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml" != "" ]; then
+            helm upgrade --install --wait --timeout 600s ${{ env.SERVICE_NAME }}-deployment spartan/spartan --create-namespace -n $NAMESPACE -f k8s/${{ env.ENVIRONMENT }}/${{ env.SERVICE_NAME }}/values.yaml --version ${{ env.HELM_SPARTAN_VERSION }}
+          else
+            helm upgrade --install --wait --timeout 600s ${{ env.SERVICE_NAME }}-deployment spartan/spartan --create-namespace -n $NAMESPACE --version ${{ env.HELM_SPARTAN_VERSION }}
+          fi
+
+      # === Step 3: Extract Git Info ===
+      - name: Extract Git Info
+        id: git-info
+        shell: bash
+        run: |
+          GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+          GITHUB_REVISION=$(git rev-parse HEAD)
+          GITHUB_REPO=$(git config --get remote.origin.url)
+          
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n3 --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+          
+          echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+          echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+          echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+          echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+          echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+          echo "${EOF}" >> "$GITHUB_ENV"
+
+      # === Step 4: Send Slack Notification ===
+      - name: Send Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && ':rocket:' || ':x:' }} *${{ env.SERVICE_NAME }} - Deployed to ${{ env.ENVIRONMENT }} (eks)*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Created by:* ${{ env.GITHUB_AUTHOR }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "```${{ env.GITHUB_COMMITS }}```"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View changes"
+                      },
+                      "style": "primary",
+                      "url": "${{ env.GITHUB_REPO }}/commit/${{ env.GITHUB_REVISION }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Run"
+                      },
+                      "style": "primary",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }

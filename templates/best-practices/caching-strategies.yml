@@ -1,0 +1,248 @@
+# Caching Strategies
+#
+# This workflow demonstrates various caching patterns for GitHub Actions.
+# Key best practices shown:
+# - Built-in caching for Node.js, Python, and Java/Gradle
+# - Manual caching with actions/cache@v4 for custom paths
+# - Cache key strategies (hash-based, branch-based, SHA-based)
+# - Restore keys for partial cache matches
+# - Cache scope control (read-only for PRs)
+#
+# Usage: This workflow can be triggered manually to demonstrate caching
+
+name: Caching Strategies
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+  actions: write # required for cache write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Example 1: Built-in caching for Node.js/Yarn
+  cache-nodejs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Built-in caching automatically handles yarn cache
+      - name: Set up Node.js with automatic yarn caching
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          # Automatically caches yarn dependencies based on yarn.lock
+          cache: 'yarn'
+          # Or for npm: cache: 'npm'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+        # On first run, this downloads dependencies
+        # On subsequent runs, this restores from cache (much faster!)
+
+      - name: Build
+        run: yarn build
+
+  # Example 2: Built-in caching for Python/pip
+  cache-python:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Built-in caching for pip dependencies
+      - name: Set up Python with automatic pip caching
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          # Automatically caches pip dependencies based on requirements.txt
+          cache: 'pip'
+          # Or for Poetry: cache: 'poetry'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+        # Cache is automatically restored if requirements.txt hasn't changed
+
+      - name: Run tests
+        run: pytest tests/
+
+  # Example 3: Built-in caching for Java/Gradle
+  cache-gradle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Built-in caching for Gradle dependencies
+      - name: Set up Java with automatic Gradle caching
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          # Automatically caches Gradle dependencies
+          cache: 'gradle'
+
+      - name: Build with Gradle
+        run: ./gradlew build
+        # Gradle cache is automatically restored
+
+  # Example 4: Manual caching with actions/cache@v4
+  cache-manual:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # KEY BEST PRACTICE: Manual caching for custom paths
+      # Strategy 1: Hash-based cache key (invalidates when files change)
+      - name: Cache dependencies (hash-based)
+        uses: actions/cache@v4
+        id: cache-deps
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          # Cache key based on file hashes - cache invalidates when files change
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          # Restore keys for partial matches (fallback to any gradle cache)
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Build
+        run: ./gradlew build
+
+  # Example 5: Branch-based caching strategy
+  cache-branch-based:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache dependencies (branch-based)
+        uses: actions/cache@v4
+        id: cache-branch
+        with:
+          path: node_modules
+          # Main branch writes to primary cache, PRs use isolated caches
+          key: ${{ runner.os }}-node-${{ github.ref }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-${{ github.ref }}-
+            ${{ runner.os }}-node-refs/heads/main-
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm ci
+
+  # Example 6: SHA-based caching (for reproducible builds)
+  cache-sha-based:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache build artifacts (SHA-based)
+        uses: actions/cache@v4
+        id: cache-sha
+        with:
+          path: dist/
+          # Cache per commit SHA (useful for reproducible builds)
+          key: ${{ runner.os }}-build-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+
+      - name: Build
+        run: npm run build
+
+  # Example 7: Time-based cache invalidation
+  cache-time-based:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache with time-based invalidation
+        uses: actions/cache@v4
+        id: cache-time
+        with:
+          path: ~/.cache/pip
+          # Add run number to force cache refresh periodically
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-${{ github.run_number }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}-
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+  # Example 8: Docker layer caching
+  cache-docker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # KEY BEST PRACTICE: Cache Docker layers
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker image with cache
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+  # Example 9: Cache scope control (read-only for PRs)
+  cache-read-only:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache dependencies (read-only for PRs)
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
+          # KEY BEST PRACTICE: PRs can read cache but not write (prevents cache pollution)
+          cache_read_only: ${{ github.event_name == 'pull_request' }}
+
+      - name: Install dependencies
+        run: npm ci
+
+  # Example 10: Multiple cache paths
+  cache-multiple-paths:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Cache multiple paths
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.m2/repository
+          key: ${{ runner.os }}-deps-${{ hashFiles('**/*.gradle*', '**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-deps-
+
+      - name: Build
+        run: ./gradlew build

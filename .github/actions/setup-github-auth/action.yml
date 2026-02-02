@@ -1,0 +1,40 @@
+name: 'Setup GitHub Authentication and Checkout'
+description: 'Generate GitHub App token and checkout source code'
+inputs:
+  app_id:
+    description: 'GitHub App ID (optional, uses GITHUB_TOKEN if not provided)'
+    required: false
+  private_key:
+    description: 'GitHub App private key (optional, uses GITHUB_TOKEN if not provided)'
+    required: false
+  fetch_depth:
+    description: 'Number of commits to fetch'
+    required: false
+    default: '3'
+  ref:
+    description: 'Git ref to checkout (defaults to head_ref for PRs)'
+    required: false
+    default: ''
+outputs:
+  token:
+    description: 'GitHub App token or GITHUB_TOKEN'
+    value: ${{ steps.github-app-token.outputs.token || github.token }}
+runs:
+  using: 'composite'
+  steps:
+    - name: Generate GitHub App Token
+      if: inputs.app_id != '' && inputs.private_key != ''
+      id: github-app-token
+      uses: actions/create-github-app-token@v2
+      with:
+        app-id: ${{ inputs.app_id }}
+        private-key: ${{ inputs.private_key }}
+        owner: ${{ github.repository_owner }}
+
+    - name: Checkout source
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: ${{ inputs.fetch_depth }}
+        token: ${{ steps.github-app-token.outputs.token || github.token }}
+        ref: ${{ inputs.ref != '' && inputs.ref || github.head_ref || github.ref }}
+        persist-credentials: ${{ inputs.app_id != '' && inputs.private_key != '' && 'false' || 'true' }}

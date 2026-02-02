@@ -1,0 +1,64 @@
+name: 'Send Slack Notification'
+description: 'Send deployment notification to Slack'
+inputs:
+  webhook_url:
+    description: 'Slack webhook URL'
+    required: true
+  status:
+    description: 'Deployment status (success, failure, etc.)'
+    required: true
+  service_name:
+    description: 'Service name'
+    required: false
+    default: ''
+  environment:
+    description: 'Environment name'
+    required: true
+  github_author:
+    description: 'Git author'
+    required: false
+    default: ''
+  github_commits:
+    description: 'Recent commits'
+    required: false
+    default: ''
+  github_revision:
+    description: 'Git revision'
+    required: false
+    default: ''
+  github_repo:
+    description: 'Git repository URL'
+    required: false
+    default: ''
+  deployment_type:
+    description: 'Deployment type (ECS, EKS, CloudFront, etc.)'
+    required: false
+    default: ''
+  base_domain:
+    description: 'Base domain for API docs link'
+    required: false
+    default: ''
+  view_run_url:
+    description: 'URL to view workflow run'
+    required: false
+    default: ''
+runs:
+  using: 'composite'
+  steps:
+    - name: Slack Notification
+      uses: slackapi/slack-github-action@v2
+      with:
+        webhook: ${{ inputs.webhook_url }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "${{ inputs.status == 'success' && ':rocket:' || ':x:' }} *${{ inputs.service_name != '' && inputs.service_name || github.event.repository.name }} - Deployed to ${{ inputs.environment }}${{ inputs.deployment_type != '' && format(' ({0})', inputs.deployment_type) || '' }}*"
+                }
+              }${{ inputs.github_author != '' && format(',\n              {\n                "type": "section",\n                "text": {\n                  "type": "mrkdwn",\n                  "text": "*Created by:* {0}"\n                }\n              }', inputs.github_author) || '' }}${{ inputs.github_commits != '' && format(',\n              {\n                "type": "section",\n                "text": {\n                  "type": "mrkdwn",\n                  "text": "```{0}```"\n                }\n              }', inputs.github_commits) || '' }}${{ inputs.view_run_url != '' || inputs.github_revision != '' || inputs.base_domain != '' && ',\n              {\n                "type": "actions",\n                "elements": [' || '' }}${{ inputs.github_revision != '' && inputs.github_repo != '' && format('{\n                      "type": "button",\n                      "text": {\n                        "type": "plain_text",\n                        "text": "View changes"\n                      },\n                      "style": "primary",\n                      "url": "{0}/commit/{1}"\n                    }', inputs.github_repo, inputs.github_revision) || '' }}${{ inputs.view_run_url != '' && format('${{ inputs.github_revision != '' && "," || "" }}\n                    {\n                      "type": "button",\n                      "text": {\n                        "type": "plain_text",\n                        "text": "View Run"\n                      },\n                      "style": "primary",\n                      "url": "{0}"\n                    }', inputs.view_run_url) || '' }}${{ inputs.base_domain != '' && inputs.service_name != '' && format('${{ inputs.view_run_url != "" && "," || "" }}\n                    {\n                      "type": "button",\n                      "text": {\n                        "type": "plain_text",\n                        "text": "API Docs"\n                      },\n                      "style": "primary",\n                      "url": "https://{0}.{1}/docs/index.html"\n                    }', inputs.service_name, inputs.base_domain) || '' }}${{ inputs.view_run_url != '' || inputs.github_revision != '' || inputs.base_domain != '' && '\n                ]\n              }' || '' }}
+            ]
+          }

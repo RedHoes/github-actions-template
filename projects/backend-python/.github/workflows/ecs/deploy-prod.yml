@@ -1,0 +1,169 @@
+name: Deploy PROD (ECS - Normal - Main/Master)
+
+on:
+  push:
+    tags: [ "v*.*.*" ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to deploy (e.g., v1.2.3). Leave empty to use latest tag."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ### General
+  ENVIRONMENT: prod
+  GITHUB_SHA: ${{ github.sha }}
+
+  ### AWS Configuration
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID_PROD }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+
+  ### ECS Configuration
+  # TODO: Update these values based on your project
+  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME_PROD }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME_PROD }}
+  TASK_FAMILY: ${{ vars.TASK_FAMILY_PROD }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+
+  ### Docker Configuration
+  DOCKER_REPO: ${{ vars.DOCKER_REPO }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_PROD }}
+
+  SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to PROD (ECS)
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # === Step 1: Determine tag ===
+      - name: Determine tag to use
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+              TAG="${{ github.event.inputs.tag }}"
+          else
+              TAG=${GITHUB_REF#refs/tags/}
+          fi
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Using tag: $TAG"
+
+      # === Step 2: Setup GitHub Auth ===
+      - uses: ./.github/actions/setup-github-auth
+        id: github-auth
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          fetch_depth: '3'
+          ref: ${{ steps.tag.outputs.tag }}
+
+      # === Step 3: Setup AWS Credentials ===
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      # === Step 4: Prepare Docker Tags ===
+      - uses: ./.github/actions/docker-prepare-tags
+        id: prepare-tags
+        with:
+          github_sha: ${{ steps.tag.outputs.tag }}
+          environment: 'prod'
+
+      - name: Set PROD_TAG
+        shell: bash
+        run: |
+          echo "PROD_TAG=${{ steps.prepare-tags.outputs.image_tag }}" >> $GITHUB_ENV
+
+      # TODO: Promote image from DEV to PROD by retagging
+      # Option 1: If using same ECR repo, retag the DEV image
+      # - name: Retag DEV image for PROD
+      #   run: |
+      #     # Get the latest DEV image tag
+      #     DEV_IMAGE_TAG=$(aws ecr describe-images --repository-name ${{ env.DOCKER_REPO }} --region ${{ env.AWS_REGION }} \
+      #       --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text | grep development || echo "")
+      #     
+      #     if [ -n "$DEV_IMAGE_TAG" ]; then
+      #       # Retag the DEV image with PROD tag
+      #       MANIFEST=$(aws ecr batch-get-image --repository-name ${{ env.DOCKER_REPO }} \
+      #         --image-ids imageTag=$DEV_IMAGE_TAG --region ${{ env.AWS_REGION }} \
+      #         --query 'images[0].imageManifest' --output text)
+      #       
+      #       aws ecr put-image --repository-name ${{ env.DOCKER_REPO }} \
+      #         --image-tag ${{ env.PROD_TAG }} --image-manifest "$MANIFEST" --region ${{ env.AWS_REGION }}
+      #     fi
+
+      # Option 2: Build new image from tag (if needed)
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v2
+      #
+      # - name: Build and Push the Docker image
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     file: Dockerfile
+      #     tags: |
+      #       ${{ env.DOCKER_REPO }}:${{ env.PROD_TAG }}
+      #     push: true
+
+      # TODO: Promote image from DEV to PROD by retagging
+      # Option 1: If using same ECR repo, retag the DEV image
+      # - name: Retag DEV image for PROD
+      #   run: |
+      #     # Get the latest DEV image tag
+      #     DEV_IMAGE_TAG=$(aws ecr describe-images --repository-name ${{ env.DOCKER_REPO }} --region ${{ env.AWS_REGION }} \
+      #       --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags[0]' --output text | grep development || echo "")
+      #     
+      #     if [ -n "$DEV_IMAGE_TAG" ]; then
+      #       # Retag the DEV image with PROD tag
+      #       MANIFEST=$(aws ecr batch-get-image --repository-name ${{ env.DOCKER_REPO }} \
+      #         --image-ids imageTag=$DEV_IMAGE_TAG --region ${{ env.AWS_REGION }} \
+      #         --query 'images[0].imageManifest' --output text)
+      #       
+      #       aws ecr put-image --repository-name ${{ env.DOCKER_REPO }} \
+      #         --image-tag ${{ env.PROD_TAG }} --image-manifest "$MANIFEST" --region ${{ env.AWS_REGION }}
+      #     fi
+
+      # Option 2: Build new image from tag (if needed)
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v2
+      #
+      # - name: Build and Push the Docker image
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: .
+      #     file: Dockerfile
+      #     tags: |
+      #       ${{ env.DOCKER_REPO }}:${{ env.PROD_TAG }}
+      #     push: true
+
+      # === Step 2: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'ecs'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          ecs_cluster_name: ${{ env.ECS_CLUSTER_NAME }}
+          task_family: ${{ env.TASK_FAMILY }}
+          container_name: ${{ env.CONTAINER_NAME }}
+          image_uri: ${{ env.DOCKER_REPO }}:${{ env.PROD_TAG }}
+          slack_webhook_url: ${{ env.SLACK_WEBHOOK_URL }}
+          base_domain: ${{ env.BASE_DOMAIN }}

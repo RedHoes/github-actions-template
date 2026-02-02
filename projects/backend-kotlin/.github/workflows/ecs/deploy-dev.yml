@@ -1,0 +1,289 @@
+name: Deploy DEV (ECS - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Kotlin/Java backend application to AWS ECS (DEV environment).
+# It builds the application, creates a Docker image, pushes it to ECR, and deploys to ECS.
+# Triggers: Push to main/master branch or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # === General Configuration ===
+  ENVIRONMENT: dev
+  ENVIRONMENT_FULL: development
+  GITHUB_SHA: ${{ github.sha }}
+
+  # === AWS Configuration ===
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID_DEV }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  # === ECS Configuration ===
+  # TODO: Update these values based on your project
+  ECS_CLUSTER_NAME: ${{ vars.ECS_CLUSTER_NAME_DEV }}
+  SERVICE_NAME: ${{ vars.SERVICE_NAME_DEV }}
+  TASK_FAMILY: ${{ vars.TASK_FAMILY_DEV }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+
+  # === Docker Configuration ===
+  DOCKER_REPO: ${{ vars.DOCKER_REPO }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_DEV }}
+
+  # === Artifact Registry ===
+  # TODO: Update these values based on your project
+  ARTIFACTORY_URL: ${{ vars.ARTIFACTORY_URL }}
+  ARTIFACTORY_USERNAME: ${{ vars.ARTIFACTORY_USERNAME }}
+  AWS_CODE_ARTIFACT_DOMAIN: ${{ vars.AWS_CODE_ARTIFACT_DOMAIN_DEV }}
+
+  # === Language Configuration ===
+  JAVA_VERSION: 17
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    name: Deploy to DEV (ECS)
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      # === Step 1: Setup Environment ===
+      
+      # Generate GitHub App Token
+      - name: Generate GitHub App Token
+        id: github-app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      # Checkout source code
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: '3'
+          token: ${{ steps.github-app-token.outputs.token }}
+          ref: ${{ github.head_ref || github.ref }}
+          persist-credentials: false
+
+      # Configure AWS Credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-session-name: gh-actions
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Install AWS CLI (if needed for CodeArtifact)
+      - name: Install AWS CLI
+        if: env.AWS_CODE_ARTIFACT_DOMAIN != ''
+        shell: bash
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          aws --version
+
+      # Configure Gradle properties for artifact registry
+      - name: Write gradle.properties
+        if: env.ARTIFACTORY_URL != '' && env.AWS_CODE_ARTIFACT_DOMAIN != ''
+        shell: bash
+        run: |
+          mkdir -p ~/.gradle
+          cat <<EOF > ~/.gradle/gradle.properties
+          artifactRegistryMavenReleaseUrl=${{ env.ARTIFACTORY_URL }}
+          artifactRegistryMavenUsername=${{ env.ARTIFACTORY_USERNAME }}
+          artifactRegistryMavenPassword=$(aws codeartifact get-authorization-token --domain ${{ env.AWS_CODE_ARTIFACT_DOMAIN }} --domain-owner ${{ env.AWS_ACCOUNT_ID }} --region ${{ env.AWS_REGION }} --query authorizationToken --output text)
+          EOF
+
+      # Set up JDK
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: 'temurin'
+          cache: gradle
+
+      # Setup Gradle
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      # === Step 2: Build and Package ===
+      
+      # Build Kotlin/Java project
+      - name: Build Java/Kotlin
+        shell: bash
+        run: ./gradlew --build-cache build -x test
+
+      # Login to Amazon ECR
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Set up Docker Buildx for caching
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      # Cache Docker layers
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      # Prepare Docker Tags
+      - name: Prepare Docker Tags
+        id: prepare-tags
+        shell: bash
+        run: |
+          GITHUB_SHA="${{ env.GITHUB_SHA }}"
+          ENV_NAME="${{ env.ENVIRONMENT_FULL }}"
+          SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-8)
+          CURRENT_DATE=$(date +%Y%m%d)
+          IMAGE_TAG="${ENV_NAME}-${CURRENT_DATE}-${SHORT_SHA}"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      # Build and Push Docker Image
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: |
+            ${{ env.DOCKER_REPO }}:${{ steps.prepare-tags.outputs.image_tag }}
+            ${{ env.DOCKER_REPO }}:${{ env.ENVIRONMENT_FULL }}
+          cache-from: type=local,src=${{ runner.temp }}/.buildx-cache
+          cache-to: type=local,dest=${{ runner.temp }}/.buildx-cache,mode=max
+          push: true
+
+      # === Step 3: Deploy to ECS ===
+      
+      # Install AWS CLI
+      - name: Install AWS CLI
+        shell: bash
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+          unzip awscliv2.zip
+          sudo ./aws/install
+          aws --version
+
+      # Create new ECS task definition
+      - name: Create new ECS task definition
+        id: create-task-def
+        shell: bash
+        run: |
+          TASK_DEF_JSON=$(aws ecs describe-task-definition --task-definition "${{ env.TASK_FAMILY }}" --region "${{ env.AWS_REGION }}")
+          NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq --arg IMAGE "${{ env.DOCKER_REPO }}:${{ steps.prepare-tags.outputs.image_tag }}" '
+              .taskDefinition
+              | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+              | (.containerDefinitions[] | select(.name=="${{ env.CONTAINER_NAME }}" )).image = $IMAGE
+            ')
+          echo "$NEW_TASK_DEF" > new-task-def.json
+          TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json --region "${{ env.AWS_REGION }}" | jq -r '.taskDefinition.taskDefinitionArn')
+          echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+      # Trigger ECS deployment
+      - name: Trigger ECS deployment
+        shell: bash
+        run: |
+          aws ecs update-service \
+              --region "${{ env.AWS_REGION }}" \
+              --cluster "${{ env.ECS_CLUSTER_NAME }}" \
+              --service "${{ env.SERVICE_NAME }}" \
+              --task-definition "${{ steps.create-task-def.outputs.task_def_arn }}"
+
+      # === Step 4: Extract Git Info ===
+      - name: Extract Git Info
+        id: git-info
+        shell: bash
+        run: |
+          GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+          GITHUB_REVISION=$(git rev-parse HEAD)
+          GITHUB_REPO=$(git config --get remote.origin.url)
+          
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n3 --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+          
+          echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+          echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+          echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+          echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+          echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+          echo "${EOF}" >> "$GITHUB_ENV"
+
+      # === Step 5: Send Slack Notification ===
+      - name: Send Slack Notification
+        if: always()
+        uses: slackapi/slack-github-action@v2
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "${{ job.status == 'success' && ':rocket:' || ':x:' }} *${{ env.SERVICE_NAME }} - Deployed to ${{ env.ENVIRONMENT }} (ecs)*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Created by:* ${{ env.GITHUB_AUTHOR }}"
+                  }
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "```${{ env.GITHUB_COMMITS }}```"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View changes"
+                      },
+                      "style": "primary",
+                      "url": "${{ env.GITHUB_REPO }}/commit/${{ env.GITHUB_REVISION }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Run"
+                      },
+                      "style": "primary",
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    }
+                  ]
+                }
+              ]
+            }

@@ -1,0 +1,273 @@
+# Performance Optimization
+#
+# This workflow demonstrates various performance optimization techniques.
+# Key best practices shown:
+# - Docker layer caching with buildx
+# - Minimal checkout depth (fetch-depth: 1)
+# - Path filters to skip workflows on irrelevant changes
+# - Artifact retention periods
+# - Parallel test execution with matrix
+# - Self-hosted runners for resource-intensive builds
+#
+# Usage: This workflow runs on push (with path filters) and can be triggered manually
+
+name: Performance Optimization
+
+on:
+  push:
+    branches: [ main, master ]
+    # KEY BEST PRACTICE: Path filters to skip workflow on irrelevant changes
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # required for cache write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Example 1: Minimal checkout depth
+  minimal-checkout:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code (minimal depth)
+        uses: actions/checkout@v4
+        with:
+          # KEY BEST PRACTICE: Only checkout latest commit, not full history
+          # This significantly speeds up checkout for large repositories
+          fetch-depth: 1
+
+      - name: Build
+        run: |
+          echo "Building with minimal checkout..."
+          npm ci
+          npm run build
+
+  # Example 2: Docker layer caching with buildx
+  docker-caching:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # KEY BEST PRACTICE: Cache Docker layers using GitHub Actions cache
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker image with cache
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          # KEY BEST PRACTICE: Use GitHub Actions cache for Docker layers
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # This caches Docker layers between runs, significantly speeding up builds
+
+  # Example 3: Parallel test execution with matrix
+  parallel-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # KEY BEST PRACTICE: Run tests in parallel using matrix
+        test-suite: [ unit, integration, e2e ]
+      fail-fast: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Run ${{ matrix.test-suite }} tests
+        run: |
+          echo "Running ${{ matrix.test-suite }} tests in parallel..."
+          npm run test:${{ matrix.test-suite }}
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.test-suite }}
+          path: test-results/
+          # KEY BEST PRACTICE: Set retention period to save storage
+          retention-days: 7
+
+  # Example 4: Artifact retention periods
+  artifact-management:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          # KEY BEST PRACTICE: Set retention period to auto-delete old artifacts
+          # This saves storage space and costs
+          retention-days: 30
+
+      - name: Upload test coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/
+          # Shorter retention for test coverage (less important)
+          retention-days: 7
+
+  # Example 5: Self-hosted runners for resource-intensive builds
+  self-hosted-runner:
+    # KEY BEST PRACTICE: Use self-hosted runners for large builds
+    # Self-hosted runners can have more CPU, RAM, and disk space
+    # runs-on: builder-16-32  # Example: 16 cores, 32GB RAM
+    # For this example, we'll use ubuntu-latest but show the pattern
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build large application
+        run: |
+          echo "Building large application..."
+          # In a real scenario with self-hosted runner:
+          # - More CPU cores = faster compilation
+          # - More RAM = can build larger projects
+          # - More disk space = can cache more dependencies
+          npm run build:large
+
+  # Example 6: Conditional step execution to skip unnecessary work
+  conditional-execution:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Check if build is needed
+        id: check-build
+        run: |
+          # KEY BEST PRACTICE: Skip unnecessary steps
+          # Check if source files changed
+          if git diff --name-only HEAD~1 HEAD | grep -q "src/"; then
+            echo "needs_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs_build=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build (only if needed)
+        if: steps.check-build.outputs.needs_build == 'true'
+        run: |
+          echo "Building..."
+          npm run build
+
+  # Example 7: Optimize dependency installation
+  optimized-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Node.js with cache
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'yarn'
+
+      - name: Install dependencies (optimized)
+        run: |
+          # KEY BEST PRACTICE: Use frozen lockfile for faster, reproducible installs
+          yarn install --frozen-lockfile
+          # Or for npm: npm ci (faster than npm install)
+
+  # Example 8: Parallel job execution
+  parallel-jobs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Lint
+        run: npm run lint
+
+  test-parallel:
+    runs-on: ubuntu-latest
+    # KEY BEST PRACTICE: Run jobs in parallel (no 'needs' dependency)
+    # This job runs simultaneously with 'parallel-jobs'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Test
+        run: npm test
+
+  build-after-parallel:
+    needs: [ parallel-jobs, test-parallel ]
+    # This job waits for both parallel jobs to complete
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build
+        run: npm run build
+
+  # Example 9: Skip workflow on documentation changes
+  skip-on-docs:
+    runs-on: ubuntu-latest
+    # This job would be skipped if only docs changed (via path filters in 'on:' section)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Build and test
+        run: |
+          echo "This workflow only runs when source code changes"
+          npm run build
+          npm test

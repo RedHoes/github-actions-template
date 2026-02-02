@@ -1,0 +1,127 @@
+# Matrix Strategy: Multi-Environment Deployment
+#
+# This workflow demonstrates using matrix strategies to deploy to multiple
+# environments in parallel. Key best practices shown:
+# - Build once, deploy to multiple environments
+# - fail-fast: false to continue deploying even if one environment fails
+# - Parallel execution for faster deployments
+# - Always send notifications regardless of success/failure
+#
+# Usage: This workflow can be triggered manually via workflow_dispatch
+# or adapted to trigger on specific events (e.g., tag creation)
+
+name: Matrix Multi-Environment Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy'
+        required: false
+        default: 'latest'
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  DOCKER_REPO_PROD: ${{ vars.DOCKER_REPO_PROD }}
+  ECS_CLUSTER_NAME_PROD: ${{ vars.ECS_CLUSTER_NAME_PROD }}
+  SERVICE_NAME_PROD: ${{ vars.SERVICE_NAME_PROD }}
+  TASK_FAMILY_PROD: ${{ vars.TASK_FAMILY_PROD }}
+  CONTAINER_NAME: ${{ vars.CONTAINER_NAME }}
+
+jobs:
+  # Step 1: Prepare image tag (build once)
+  prepare-image:
+    runs-on: ubuntu-latest
+    outputs:
+      IMAGE_TAG: ${{ steps.prepare_image.outputs.app_version }}
+    steps:
+      - name: Prepare image tag
+        id: prepare_image
+        run: |
+          # Use provided tag or generate from commit SHA
+          if [ -n "${{ inputs.image_tag }}" ] && [ "${{ inputs.image_tag }}" != "latest" ]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+          else
+            IMAGE_TAG=${GITHUB_SHA::8}
+          fi
+          echo "app_version=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "Deploying image tag: ${IMAGE_TAG}"
+
+  # Step 2: Deploy to multiple environments in parallel using matrix
+  deploy:
+    needs: prepare-image
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Deploy to multiple production environments in parallel
+        environment: [ prod-1, prod-2, prod-3 ]
+      # KEY BEST PRACTICE: fail-fast: false allows other environments
+      # to continue deploying even if one fails
+      fail-fast: false
+
+    name: Deploy to ${{ matrix.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Example: Setup AWS credentials using OIDC
+      # In a real scenario, you would use your composite action:
+      # - uses: ./.github/actions/setup-aws-credentials
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME_PROD }}
+          role-session-name: gh-actions-${{ matrix.environment }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ${{ matrix.environment }}
+        run: |
+          echo "Deploying to ${{ matrix.environment }}"
+          echo "Image: ${{ env.DOCKER_REPO_PROD }}:${{ needs.prepare-image.outputs.IMAGE_TAG }}"
+          echo "Cluster: ${{ env.ECS_CLUSTER_NAME_PROD }}-${{ matrix.environment }}"
+          echo "Service: ${{ env.SERVICE_NAME_PROD }}-${{ matrix.environment }}"
+          
+          # In a real scenario, you would deploy using your composite action:
+          # - uses: ./.github/actions/deploy-ecs
+          #   with:
+          #     aws_region: ${{ env.AWS_REGION }}
+          #     ecs_cluster_name: ${{ env.ECS_CLUSTER_NAME_PROD }}-${{ matrix.environment }}
+          #     service_name: ${{ env.SERVICE_NAME_PROD }}-${{ matrix.environment }}
+          #     task_family: ${{ env.TASK_FAMILY_PROD }}-${{ matrix.environment }}
+          #     container_name: ${{ env.CONTAINER_NAME }}
+          #     image_uri: ${{ env.DOCKER_REPO_PROD }}:${{ needs.prepare-image.outputs.IMAGE_TAG }}
+
+      # KEY BEST PRACTICE: Always send notifications, even on failure
+      - name: Send deployment notification
+        if: always()
+        run: |
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment to ${{ matrix.environment }} succeeded"
+          else
+            echo "❌ Deployment to ${{ matrix.environment }} failed"
+          fi
+          # In a real scenario, you would use your notification action:
+          # - uses: ./.github/actions/send-slack-notification
+          #   with:
+          #     status: ${{ job.status }}
+          #     environment: ${{ matrix.environment }}
+
+  # Optional: Summary job that runs after all deployments
+  deployment-summary:
+    needs: [ prepare-image, deploy ]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Deployment summary
+        run: |
+          echo "Deployment summary for image: ${{ needs.prepare-image.outputs.IMAGE_TAG }}"
+          echo "All environments processed (check individual jobs for status)"

@@ -1,0 +1,176 @@
+name: Deploy DEV (ArgoCD GitOps - Normal - Main/Master)
+
+# === Workflow Description ===
+# This workflow deploys a Kotlin/Java backend application to AWS EKS using ArgoCD GitOps (DEV environment).
+# It builds Docker images (main + migration), pushes them to ECR, and updates the ArgoCD GitOps repository.
+# ArgoCD automatically syncs changes to the cluster.
+# Triggers: Push to main/master branch (specific paths) or manual workflow dispatch.
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+    paths:
+      - 'app/**/*'
+      - 'core/**/*'
+      - 'k8s/dev/*'
+      - 'Dockerfile'
+      - 'Dockerfile.migration'
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ### General
+  ENVIRONMENT: dev
+  GITHUB_SHA: ${{ github.sha }}
+
+  ### AWS Configuration
+  AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID_DEV }}
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+
+  ### ArgoCD Configuration
+  # TODO: Update these values based on your project
+  ARGOCD_NAMESPACE: ${{ vars.ARGOCD_NAMESPACE }}
+  ARGOCD_PROJECT_NAME: ${{ vars.K8S_NAMESPACE }}-dev
+  ARGOCD_REPO_NAME: ${{ vars.ARGOCD_REPO_NAME }}
+  ARGOCD_SERVICE_PROJECT_NAME: ${{ vars.SERVICE_NAME }}-dev
+
+  ### Artifact registry
+  ARTIFACTORY_URL: ${{ vars.ARTIFACTORY_URL }}
+  ARTIFACTORY_USERNAME: ${{ vars.ARTIFACTORY_USERNAME }}
+  AWS_CODE_ARTIFACT_DOMAIN: ${{ vars.AWS_CODE_ARTIFACT_DOMAIN_DEV }}
+
+  ### Docker Configuration
+  DOCKER_REPO: ${{ vars.DOCKER_REPO_DEV }}
+  BASE_DOMAIN: ${{ vars.BASE_DOMAIN_DEV }}
+  CLUSTER_NAME: ${{ vars.AWS_EKS_CLUSTER_NAME_DEV }}
+
+  ### Helm Configuration
+  HELM_REPO: ${{ vars.HELM_REPO_SPARTAN }}
+  HELM_CHART: 'spartan'
+  HELM_VERSION: ${{ vars.HELM_VERSION_SPARTAN }}
+
+  ### Kubernetes Configuration
+  K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
+  K8S_CONTAINER_PORT: '8080'
+  K8S_REPLICA_COUNT: '1'
+  SERVICE_NAME: ${{ vars.SERVICE_NAME }}
+
+  ### Notification
+  SLACK_NOTIFICATION_CHANNEL: ${{ vars.SLACK_NOTIFICATION_CHANNEL }}
+  SWAGGER_URL: https://${{ vars.SERVICE_NAME }}.${{ vars.BASE_DOMAIN_DEV }}/swagger/views/swagger-ui/index.html
+
+  JAVA_VERSION: 17
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: ./.github/actions/setup-github-auth
+        id: setup-github-auth
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          fetch_depth: '3'
+          ref: ${{ github.head_ref }}
+
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/docker-ecr-login
+        id: login-ecr
+        with:
+          aws_region: ${{ env.AWS_REGION }}
+
+      - uses: ./.github/actions/setup-java-kotlin
+        with:
+          java_version: ${{ env.JAVA_VERSION }}
+          cache_read_only: 'false'
+
+      - uses: ./.github/actions/build-java-kotlin
+        with:
+          exclude_tests: 'true'
+
+      - uses: ./.github/actions/extract-app-version
+        id: extract-version
+        with:
+          version_source: 'manifest'
+          version_file: 'manifest.json'
+
+      - uses: ./.github/actions/docker-prepare-tags
+        id: prepare-tags
+        with:
+          github_sha: ${{ env.GITHUB_SHA }}
+          environment: ${{ env.ENVIRONMENT }}
+
+      - name: Set IMAGE_TAG
+        shell: bash
+        run: |
+          echo "IMAGE_TAG=${{ steps.prepare-tags.outputs.image_tag }}" >> $GITHUB_ENV
+
+      - uses: ./.github/actions/docker-build-push
+        with:
+          context: .
+          dockerfile: Dockerfile
+          image_repo: ${{ env.DOCKER_REPO }}
+          image_tag: ${{ env.IMAGE_TAG }}
+          build_args: |
+            APP_VERSION=${{ steps.extract-version.outputs.app_version }}
+          push: 'true'
+
+      - uses: ./.github/actions/docker-build-push
+        with:
+          context: .
+          dockerfile: Dockerfile.migration
+          image_repo: ${{ env.DOCKER_REPO }}
+          image_tag: ${{ env.IMAGE_TAG }}-migration
+          push: 'true'
+
+      - name: "Update values for k8s files"
+        uses: cschleiden/replace-tokens@v1
+        with:
+          tokenPrefix: "__"
+          tokenSuffix: "__"
+          files: '["k8s/${{ env.ENVIRONMENT }}/**/*.yaml"]'
+        env:
+          CONFIG_MAP_NAME: ${{ env.SERVICE_NAME }}-config-map
+          CONFIG_SECRET_NAME: ${{ env.SERVICE_NAME }}-env-var
+          IMAGE_TAG: ${{ steps.prepare-tags.outputs.image_tag }}
+
+      - uses: ./.github/actions/commit-argocd-values
+        with:
+          argocd_repo_name: ${{ env.ARGOCD_REPO_NAME }}
+          service_name: ${{ env.SERVICE_NAME }}
+          environment: ${{ env.ENVIRONMENT }}
+          github_token: ${{ steps.setup-github-auth.outputs.token }}
+
+      - uses: ./.github/actions/extract-git-info
+        id: git-info
+
+      - uses: ./.github/actions/send-slack-notification
+        if: always()
+        with:
+          webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          status: ${{ job.status }}
+          service_name: ${{ github.event.repository.name }}
+          environment: DEV
+          github_author: ${{ env.GITHUB_AUTHOR }}
+          github_commits: ${{ env.GITHUB_COMMITS }}
+          github_revision: ${{ env.GITHUB_REVISION }}
+          github_repo: ${{ env.GITHUB_REPO }}
+          deployment_type: ArgoCD
+          view_run_url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

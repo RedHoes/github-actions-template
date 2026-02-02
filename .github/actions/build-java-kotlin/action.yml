@@ -1,0 +1,22 @@
+name: 'Build Java/Kotlin'
+description: 'Run Gradle build commands'
+inputs:
+  build_command:
+    description: 'Gradle build command'
+    required: false
+    default: './gradlew --build-cache build -x test'
+  exclude_tests:
+    description: 'Whether to exclude tests'
+    required: false
+    default: 'true'
+runs:
+  using: 'composite'
+  steps:
+    - name: Run build
+      shell: bash
+      run: |
+        if [ "${{ inputs.exclude_tests }}" = "true" ]; then
+          ./gradlew --build-cache build -x test
+        else
+          ./gradlew --build-cache build
+        fi

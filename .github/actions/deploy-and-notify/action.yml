@@ -1,0 +1,281 @@
+name: 'Deploy and Notify'
+description: 'Combined deploy and notification: deploy to target, extract git info, send Slack notification'
+inputs:
+  deployment_type:
+    description: 'Deployment type: ecs, eks, cloudfront, amplify, terraform'
+    required: true
+  aws_region:
+    description: 'AWS region'
+    required: true
+  service_name:
+    description: 'Service name'
+    required: true
+  environment:
+    description: 'Environment name (dev, prod)'
+    required: true
+  slack_webhook_url:
+    description: 'Slack webhook URL'
+    required: true
+  # ECS specific
+  ecs_cluster_name:
+    description: 'ECS cluster name (for ecs)'
+    required: false
+    default: ''
+  task_family:
+    description: 'ECS task family (for ecs)'
+    required: false
+    default: ''
+  container_name:
+    description: 'ECS container name (for ecs)'
+    required: false
+    default: ''
+  image_uri:
+    description: 'Docker image URI (for ecs/eks)'
+    required: false
+    default: ''
+  # EKS specific
+  helm_repo:
+    description: 'Helm repository URL (for eks)'
+    required: false
+    default: ''
+  helm_chart:
+    description: 'Helm chart name (for eks)'
+    required: false
+    default: 'spartan'
+  helm_version:
+    description: 'Helm chart version (for eks)'
+    required: false
+    default: ''
+  values_file:
+    description: 'Helm values file path (for eks)'
+    required: false
+    default: ''
+  github_token:
+    description: 'GitHub token for Helm repo (for eks)'
+    required: false
+    default: ''
+  # CloudFront specific
+  s3_bucket:
+    description: 'S3 bucket name (for cloudfront)'
+    required: false
+    default: ''
+  cloudfront_id:
+    description: 'CloudFront distribution ID (for cloudfront)'
+    required: false
+    default: ''
+  source_dir:
+    description: 'Source directory to deploy (for cloudfront)'
+    required: false
+    default: 'dist/'
+  cloudfront_paths:
+    description: 'CloudFront paths to invalidate (for cloudfront)'
+    required: false
+    default: '/*'
+  # Amplify specific
+  webhook_url:
+    description: 'Amplify webhook URL (for amplify)'
+    required: false
+    default: ''
+  # Terraform specific
+  tf_version:
+    description: 'Terraform version (for terraform)'
+    required: false
+    default: ''
+  tf_working_directory:
+    description: 'Terraform working directory (for terraform)'
+    required: false
+    default: '.'
+  tf_auto_approve:
+    description: 'Auto-approve terraform apply (for terraform)'
+    required: false
+    default: 'true'
+  # Common
+  base_domain:
+    description: 'Base domain for API docs link'
+    required: false
+    default: ''
+
+runs:
+  using: 'composite'
+  steps:
+    # === Deploy to ECS ===
+    - name: Install AWS CLI
+      if: inputs.deployment_type == 'ecs'
+      shell: bash
+      run: |
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip awscliv2.zip
+        sudo ./aws/install
+        aws --version
+
+    - name: Create new ECS task definition
+      if: inputs.deployment_type == 'ecs'
+      id: create-task-def
+      shell: bash
+      run: |
+        TASK_DEF_JSON=$(aws ecs describe-task-definition --task-definition "${{ inputs.task_family }}" --region "${{ inputs.aws_region }}")
+        NEW_TASK_DEF=$(echo "$TASK_DEF_JSON" | jq --arg IMAGE "${{ inputs.image_uri }}" '
+            .taskDefinition
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)
+            | (.containerDefinitions[] | select(.name=="${{ inputs.container_name }}" )).image = $IMAGE
+          ')
+        echo "$NEW_TASK_DEF" > new-task-def.json
+        TASK_DEF_ARN=$(aws ecs register-task-definition --cli-input-json file://new-task-def.json --region "${{ inputs.aws_region }}" | jq -r '.taskDefinition.taskDefinitionArn')
+        echo "task_def_arn=$TASK_DEF_ARN" >> $GITHUB_OUTPUT
+
+    - name: Trigger ECS deployment
+      if: inputs.deployment_type == 'ecs'
+      shell: bash
+      run: |
+        aws ecs update-service \
+            --region "${{ inputs.aws_region }}" \
+            --cluster "${{ inputs.ecs_cluster_name }}" \
+            --service "${{ inputs.service_name }}" \
+            --task-definition "${{ steps.create-task-def.outputs.task_def_arn }}"
+
+    # === Deploy to EKS via Helm ===
+    - name: Deploy to EKS via Helm
+      if: inputs.deployment_type == 'eks'
+      shell: bash
+      run: |
+        if [ "${{ inputs.github_token }}" != "" ]; then
+          helm repo add spartan https://${{ inputs.github_token }}@${{ inputs.helm_repo }}
+        else
+          helm repo add spartan ${{ inputs.helm_repo }}
+        fi
+        
+        NAMESPACE="${{ inputs.service_name }}-${{ inputs.environment }}"
+        
+        if [ "${{ inputs.values_file }}" != "" ]; then
+          helm upgrade --install --wait --timeout 600s ${{ inputs.service_name }}-deployment spartan/${{ inputs.helm_chart }} --create-namespace -n $NAMESPACE -f ${{ inputs.values_file }} --version ${{ inputs.helm_version }}
+        else
+          helm upgrade --install --wait --timeout 600s ${{ inputs.service_name }}-deployment spartan/${{ inputs.helm_chart }} --create-namespace -n $NAMESPACE --version ${{ inputs.helm_version }}
+        fi
+
+    # === Deploy to CloudFront ===
+    - name: Sync to S3
+      if: inputs.deployment_type == 'cloudfront'
+      shell: bash
+      run: |
+        aws s3 sync --delete ${{ inputs.source_dir }} s3://${{ inputs.s3_bucket }}
+
+    - name: Invalidate CloudFront
+      if: inputs.deployment_type == 'cloudfront'
+      uses: chetan/invalidate-cloudfront-action@v2
+      with:
+        DISTRIBUTION: ${{ inputs.cloudfront_id }}
+        PATHS: ${{ inputs.cloudfront_paths }}
+        AWS_REGION: ${{ inputs.aws_region }}
+
+    # === Deploy to Amplify ===
+    - name: Trigger Amplify Deployment
+      if: inputs.deployment_type == 'amplify'
+      shell: bash
+      run: |
+        curl -X POST "${{ inputs.webhook_url }}"
+
+    # === Deploy Terraform ===
+    - name: Setup Terraform
+      if: inputs.deployment_type == 'terraform'
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ inputs.tf_version }}
+
+    - name: Terraform Init
+      if: inputs.deployment_type == 'terraform'
+      shell: bash
+      working-directory: ${{ inputs.tf_working_directory }}
+      run: terraform init
+
+    - name: Terraform Plan
+      if: inputs.deployment_type == 'terraform'
+      shell: bash
+      working-directory: ${{ inputs.tf_working_directory }}
+      run: terraform plan -out=tfplan -no-color
+
+    - name: Terraform Apply
+      if: inputs.deployment_type == 'terraform'
+      shell: bash
+      working-directory: ${{ inputs.tf_working_directory }}
+      run: |
+        if [ "${{ inputs.tf_auto_approve }}" = "true" ]; then
+          terraform apply -auto-approve tfplan
+        else
+          terraform apply tfplan
+        fi
+
+    # === Extract Git Info ===
+    - name: Extract Git Info
+      id: git-info
+      shell: bash
+      run: |
+        GITHUB_AUTHOR=$(git log -1 --pretty=format:'%an <%ae>' | xargs)
+        GITHUB_REVISION=$(git rev-parse HEAD)
+        GITHUB_REPO=$(git config --get remote.origin.url)
+        
+        EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+        GITHUB_COMMITS=$(git --no-pager log --pretty=format:'%h (%an) %s' -n3 --no-color | while read line || [ -n "$line" ]; do echo -n "- $line \\n"; done)
+        
+        echo "GITHUB_AUTHOR=${GITHUB_AUTHOR}" >> $GITHUB_ENV
+        echo "GITHUB_REVISION=${GITHUB_REVISION}" >> $GITHUB_ENV
+        echo "GITHUB_REPO=${GITHUB_REPO}" >> $GITHUB_ENV
+        echo "GITHUB_COMMITS<<${EOF}" >> "$GITHUB_ENV"
+        echo $GITHUB_COMMITS | sed "s/\"/'/g" >> "$GITHUB_ENV"
+        echo "${EOF}" >> "$GITHUB_ENV"
+
+    # === Send Slack Notification ===
+    - name: Send Slack Notification
+      if: always()
+      uses: slackapi/slack-github-action@v2
+      with:
+        webhook: ${{ inputs.slack_webhook_url }}
+        webhook-type: incoming-webhook
+        payload: |
+          {
+            "blocks": [
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "${{ job.status == 'success' && ':rocket:' || ':x:' }} *${{ inputs.service_name }} - Deployed to ${{ inputs.environment }}${{ inputs.deployment_type != '' && format(' ({0})', inputs.deployment_type) || '' }}*"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "*Created by:* ${{ env.GITHUB_AUTHOR }}"
+                }
+              },
+              {
+                "type": "section",
+                "text": {
+                  "type": "mrkdwn",
+                  "text": "```${{ env.GITHUB_COMMITS }}```"
+                }
+              },
+              {
+                "type": "actions",
+                "elements": [
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View changes"
+                    },
+                    "style": "primary",
+                    "url": "${{ env.GITHUB_REPO }}/commit/${{ env.GITHUB_REVISION }}"
+                  },
+                  {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "text": "View Run"
+                    },
+                    "style": "primary",
+                    "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  }${{ inputs.base_domain != '' && inputs.service_name != '' && format(',\n                  {\n                    "type": "button",\n                    "text": {\n                      "type": "plain_text",\n                      "text": "API Docs"\n                    },\n                    "style": "primary",\n                    "url": "https://{0}.{1}/docs/index.html"\n                  }', inputs.service_name, inputs.base_domain) || '' }}
+                ]
+              }
+            ]
+          }

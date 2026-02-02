@@ -1,0 +1,119 @@
+name: 'Build and Package'
+description: 'Combined build and Docker operations: build code, prepare tags, build and push Docker image'
+outputs:
+  image_tag:
+    description: 'Docker image tag'
+    value: ${{ steps.prepare-tags.outputs.image_tag }}
+inputs:
+  language:
+    description: 'Language: java-kotlin or python'
+    required: true
+  build_command:
+    description: 'Custom build command (optional)'
+    required: false
+    default: ''
+  exclude_tests:
+    description: 'Exclude tests from build'
+    required: false
+    default: 'true'
+  docker_context:
+    description: 'Docker build context'
+    required: false
+    default: '.'
+  dockerfile:
+    description: 'Dockerfile path'
+    required: false
+    default: 'Dockerfile'
+  docker_repo:
+    description: 'Docker repository URI'
+    required: true
+  environment:
+    description: 'Environment name (dev, prod)'
+    required: true
+  environment_full:
+    description: 'Full environment name (development, production)'
+    required: false
+    default: ''
+  github_sha:
+    description: 'GitHub SHA'
+    required: false
+    default: ''
+  use_docker_cache:
+    description: 'Use Docker layer caching'
+    required: false
+    default: 'true'
+  aws_region:
+    description: 'AWS region'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    # === Build Code ===
+    - name: Build Java/Kotlin
+      if: inputs.language == 'java-kotlin'
+      shell: bash
+      run: |
+        if [ "${{ inputs.exclude_tests }}" = "true" ]; then
+          ./gradlew --build-cache build -x test
+        else
+          ./gradlew --build-cache build
+        fi
+
+    - name: Build Python
+      if: inputs.language == 'python'
+      shell: bash
+      run: |
+        if [ "${{ inputs.build_command }}" != "" ]; then
+          ${{ inputs.build_command }}
+        else
+          echo "Add your Python build commands here"
+        fi
+
+    # === Docker Operations ===
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+      with:
+        aws-region: ${{ inputs.aws_region }}
+
+    - name: Set up Docker Buildx
+      if: inputs.use_docker_cache == 'true'
+      uses: docker/setup-buildx-action@v2
+
+    - name: Cache Docker layers
+      if: inputs.use_docker_cache == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/.buildx-cache
+        key: ${{ runner.os }}-buildx-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-buildx-
+
+    - name: Prepare Docker Tags
+      id: prepare-tags
+      shell: bash
+      run: |
+        GITHUB_SHA="${{ inputs.github_sha || github.sha }}"
+        ENV_NAME="${{ inputs.environment_full || inputs.environment }}"
+        if [ "$ENV_NAME" != "" ]; then
+          SHORT_SHA=$(echo $GITHUB_SHA | cut -c1-8)
+          CURRENT_DATE=$(date +%Y%m%d)
+          IMAGE_TAG="${ENV_NAME}-${CURRENT_DATE}-${SHORT_SHA}"
+        else
+          IMAGE_TAG=$(echo $GITHUB_SHA | cut -c1-8)
+        fi
+        echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_ENV
+        echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+    - name: Build and Push Docker Image
+      uses: docker/build-push-action@v6
+      with:
+        context: ${{ inputs.docker_context }}
+        file: ${{ inputs.dockerfile }}
+        tags: |
+          ${{ inputs.docker_repo }}:${{ steps.prepare-tags.outputs.image_tag }}
+          ${{ inputs.docker_repo }}:${{ inputs.environment_full || inputs.environment }}
+        cache-from: ${{ inputs.use_docker_cache == 'true' && format('type=local,src={0}/.buildx-cache', runner.temp) || '' }}
+        cache-to: ${{ inputs.use_docker_cache == 'true' && format('type=local,dest={0}/.buildx-cache,mode=max', runner.temp) || '' }}
+        push: true

@@ -1,0 +1,59 @@
+name: Terraform Deploy DEV (Normal - Main/Master)
+
+on:
+  push:
+    branches: [ 'main', 'master' ]
+    paths:
+      - '**/*.tf'
+      - '**/*.tfvars'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # TODO: Update AWS region and environment
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME_DEV }}
+  TF_VERSION: 1.6.0
+  ENVIRONMENT: dev
+
+jobs:
+  terraform-apply:
+    name: Terraform Apply (DEV)
+    runs-on: ubuntu-latest
+
+    steps:
+      # === Step 1: Setup Environment ===
+      - uses: ./.github/actions/setup-github-auth
+        with:
+          app_id: ${{ vars.GH_APP_ID }}
+          private_key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          fetch_depth: '3'
+          ref: ${{ github.ref }}
+
+      - uses: ./.github/actions/setup-aws-credentials
+        with:
+          role_to_assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws_region: ${{ env.AWS_REGION }}
+
+      # === Step 2: Deploy and Notify ===
+      - uses: ./.github/actions/deploy-and-notify
+        with:
+          deployment_type: 'terraform'
+          aws_region: ${{ env.AWS_REGION }}
+          service_name: ${{ github.event.repository.name }}
+          environment: ${{ env.ENVIRONMENT }}
+          tf_version: ${{ env.TF_VERSION }}
+          tf_working_directory: '.'
+          tf_auto_approve: 'true'
+          slack_webhook_url: ${{ secrets.SLACK_WEBHOOK_URL }}
+        # TODO: Update working directory and backend configuration
+        # tf_working_directory: ./terraform
+        # env:
+        #   TF_BACKEND_CONFIG: ${{ secrets.TF_BACKEND_CONFIG_DEV }}
