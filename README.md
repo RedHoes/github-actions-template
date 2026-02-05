@@ -71,7 +71,6 @@ To test workflows:
 3. **For Backend: What's your deployment target?**
     - [ ] **EKS** (Kubernetes) - Use if you have Kubernetes clusters
     - [ ] **ECS** (AWS Container Service) - Use if you prefer simpler AWS-native deployments
-    - [ ] **ArgoCD GitOps** - Use if you have ArgoCD set up for GitOps workflows
 
 4. **For Frontend: What's your deployment method?**
     - [ ] **CloudFront/S3** - Static site hosting on AWS
@@ -117,7 +116,6 @@ cp templates/frontend/amplify/deploy-*.yml <your-project>/.github/workflows/
 ```bash
 # 1. Always copy these base workflows
 cp templates/backend/kotlin/pr-check.yml <your-project>/.github/workflows/
-cp templates/backend/kotlin/master-build.yml <your-project>/.github/workflows/
 
 # 2. Choose your deployment method:
 
@@ -126,9 +124,6 @@ cp templates/backend/kotlin/eks/deploy-*.yml <your-project>/.github/workflows/
 
 # Option B: ECS
 cp templates/backend/kotlin/ecs/deploy-*.yml <your-project>/.github/workflows/
-
-# Option C: ArgoCD GitOps
-cp templates/backend/kotlin/eks/argo/deploy-*.yml <your-project>/.github/workflows/
 ```
 
 **Python Projects:**
@@ -136,7 +131,6 @@ cp templates/backend/kotlin/eks/argo/deploy-*.yml <your-project>/.github/workflo
 ```bash
 # 1. Always copy these base workflows
 cp templates/backend/python/pr-check.yml <your-project>/.github/workflows/
-cp templates/backend/python/master-build.yml <your-project>/.github/workflows/
 
 # 2. Choose your deployment method (same options as Kotlin above, but use python/ instead of kotlin/)
 # Example for EKS:
@@ -260,12 +254,6 @@ Go to your GitHub repository → **Settings** → **Secrets and variables** → 
 - [ ] `SERVICE_NAME_PROD` (variable)
 - [ ] `DOCKER_REPO` (variable)
 
-**For ArgoCD:**
-
-- [ ] `ARGOCD_REPO_NAME` (variable) - Your ArgoCD GitOps repository name
-- [ ] `ARGOCD_NAMESPACE` (variable)
-- [ ] `K8S_NAMESPACE` (variable)
-
 #### Infrastructure-Specific
 
 - [ ] `TF_BACKEND_CONFIG_DEV` (secret, optional)
@@ -326,10 +314,6 @@ Go to your GitHub repository → **Settings** → **Secrets and variables** → 
     - Runs tests
     - Runs database migrations (Flyway for Kotlin)
 
-- **`master-build.yml`**: Runs on `main`/`master` branch
-    - Full build
-    - Optional health checks
-
 - **`deploy-dev.yml`**: Deploys to DEV
     - Builds Docker image
     - Pushes to ECR
@@ -338,17 +322,6 @@ Go to your GitHub repository → **Settings** → **Secrets and variables** → 
 - **`deploy-prod.yml`**: Deploys to PROD
     - Promotes DEV image to PROD (no rebuild)
     - Deploys to PROD environment
-
-- **`deploy-dev.yml` (ArgoCD)**: Deploys to DEV using ArgoCD GitOps
-    - Builds Docker images (main + migration)
-    - Pushes to ECR
-    - Updates ArgoCD GitOps repository with new values
-    - ArgoCD automatically syncs changes to cluster
-
-- **`deploy-prod.yml` (ArgoCD)**: Deploys to PROD using ArgoCD GitOps
-    - Promotes DEV image to PROD (or builds from tag)
-    - Updates ArgoCD GitOps repository with new values
-    - ArgoCD automatically syncs changes to cluster
 
 ### Infrastructure Workflows
 
@@ -452,7 +425,7 @@ Combines environment setup, build, lint, and test operations.
 - `run_linters`, `run_build` - Feature flags
 - Language-specific configuration
 
-**Used in:** PR check and master build workflows
+**Used in:** PR check workflows
 
 #### `deploy-and-notify`
 
@@ -469,7 +442,7 @@ Combines deployment and notification operations. Supports multiple deployment ty
 
 ### Individual Actions (For Advanced Use Cases)
 
-These actions are still available for workflows that need more granular control (e.g., ArgoCD workflows):
+These actions are still available for workflows that need more granular control:
 
 #### Authentication & Setup
 
@@ -488,20 +461,13 @@ These actions are still available for workflows that need more granular control 
 - `docker-prepare-tags` - Prepare Docker image tags from SHA/version
 - `docker-build-push` - Build and push Docker image to ECR
 
-#### ArgoCD GitOps Operations
-
-- `commit-argocd-values` - Copy values file to ArgoCD GitOps repository and commit
-    - **Inputs:** `argocd_repo_name`, `service_name`, `environment`, `values_file_path`, `commit_message`,
-      `github_token`
-    - **Used in:** ArgoCD deployment workflows
-
 #### Utilities
 
 - `extract-git-info` - Extract git author, revision, and commit messages
 - `extract-app-version` - Extract application version from manifest.json, pyproject.toml, or git tag
     - **Inputs:** `version_source` (manifest, pyproject, or git-tag), `version_file`
     - **Outputs:** `app_version`
-    - **Used in:** ArgoCD workflows and version extraction scenarios
+    - **Used in:** Version extraction scenarios
 - `send-slack-notification` - Send deployment notification to Slack
 
 ### Example: Using Consolidated Actions (Templates)
@@ -596,7 +562,6 @@ steps:
     ├── docker-ecr-login/         # Individual: Docker ECR login
     ├── docker-prepare-tags/      # Individual: Docker tag preparation
     ├── docker-build-push/        # Individual: Docker build & push
-    ├── commit-argocd-values/     # Individual: ArgoCD GitOps commit
     ├── extract-git-info/         # Individual: Git info extraction
     ├── extract-app-version/      # Individual: App version extraction
     └── send-slack-notification/  # Individual: Slack notifications
@@ -609,11 +574,9 @@ templates/
 ├── backend/                       # Backend templates
 │   ├── kotlin/                   # Kotlin/Java
 │   │   ├── pr-check.yml         # PR validation
-│   │   ├── master-build.yml     # Master branch build
 │   │   ├── eks/                 # EKS/Kubernetes
 │   │   │   ├── deploy-dev.yml
-│   │   │   ├── deploy-prod.yml
-│   │   │   └── argo/            # ArgoCD GitOps
+│   │   │   └── deploy-prod.yml
 │   │   └── ecs/                 # ECS
 │   │       ├── deploy-dev.yml
 │   │       └── deploy-prod.yml
@@ -723,14 +686,6 @@ templates/
 
 - `PYTHON_VERSION` - Python version (e.g., `3.11`)
 
-**ArgoCD:**
-
-**Variables:**
-
-- `ARGOCD_REPO_NAME` - Your ArgoCD GitOps repository name
-- `ARGOCD_NAMESPACE` - ArgoCD namespace
-- `K8S_NAMESPACE` - Kubernetes namespace
-
 ### Infrastructure (Terraform) Templates
 
 **Secrets:**
@@ -757,19 +712,6 @@ templates/
 
 - **EKS**: Choose if you already have Kubernetes clusters or need Kubernetes features
 - **ECS**: Choose if you want simpler AWS-native container orchestration
-
-### What's ArgoCD GitOps?
-
-- Uses Git as the source of truth for deployments
-- Workflow commits to a separate GitOps repository
-- ArgoCD automatically syncs changes to your cluster
-- Use if your organization uses ArgoCD
-
-**ArgoCD workflows use specialized actions:**
-
-- `extract-app-version` - Extracts version from manifest.json, pyproject.toml, or git tags
-- `commit-argocd-values` - Handles GitOps repository checkout, file copy, and commit operations
-- `docker-build-push` - Builds and pushes multiple Docker images (main + migration)
 
 ### How do I deploy to multiple environments?
 
